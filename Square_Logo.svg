@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="135"
+   height="135"
+   id="svg2"
+   version="1.1"
+   sodipodi:docname="Square_Logo.svg"
+   inkscape:export-filename="Square_Logo.svg"
+   inkscape:export-xdpi="259.20001"
+   inkscape:export-ydpi="259.20001"
+   inkscape:version="1.4 (e7c3feb100, 2024-10-09)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#999999"
+     borderopacity="1"
+     inkscape:showpageshadow="0"
+     inkscape:pageopacity="0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="2.2874904"
+     inkscape:cx="-8.7432059"
+     inkscape:cy="28.196839"
+     inkscape:window-width="1227"
+     inkscape:window-height="1210"
+     inkscape:window-x="4620"
+     inkscape:window-y="490"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="svg2" />
+  <title
+     id="title3226">i3Detroit Logo</title>
+  <defs
+     id="defs4" />
+  <metadata
+     id="metadata7">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <dc:title>i3Detroit Logo</dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <g
+     id="layer1"
+     transform="matrix(2.7149148,0,0,2.7149148,-315.43127,-1988.1823)">
+    <g
+       id="g1"
+       transform="translate(0.263755,-0.162015)">
+      <path
+         style="fill:#1887bf;stroke-width:0.0993968"
+         d="m 142.76229,742.87393 8.96962,-7.1757 v -2.18977 h -21.81343 v 2.18977 l 17.77078,0.042 -8.69539,6.97895 -0.007,2.1699 c 0.59056,-0.0616 1.18955,-0.095 1.79662,-0.095 9.48909,0 17.18123,7.69214 17.18123,17.18124 0,9.48909 -7.69214,17.18123 -17.18123,17.18123 -9.48909,0 -17.18123,-7.69214 -17.18123,-17.18123 0,-4.90205 2.05636,-9.32066 5.34875,-12.45101 l -1.48331,-1.37753 c -3.62693,3.49318 -5.88676,8.39523 -5.88676,13.82854 0,10.60519 8.59736,19.20255 19.20255,19.20255 10.6052,0 19.20256,-8.59736 19.20256,-19.20255 0,-9.93749 -7.54795,-18.11105 -17.22334,-19.10149 z"
+         id="path3051" />
+      <path
+         style="fill:#828282;stroke-width:0.0993968"
+         d="m 139.01442,751.2368 h 3.78998 v 3.57943 h -3.78998 z"
+         id="rect3055" />
+      <path
+         style="fill:#828282;stroke-width:0.0993968"
+         d="m 139.01442,756.45856 h 3.78998 v 16.2969 h -3.78998 z"
+         id="rect3057" />
+    </g>
+  </g>
+</svg>

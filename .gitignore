@@ -1,0 +1,27 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# ESPHome
+esp32/.esphome/
+esp32/secrets.yaml
+
+# PlatformIO
+esp32/usb_test/.pio/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Credentials
+wifi.yaml
+
+# Third-party
+brother_ql_web/
+
+# Claude
+.claude/
