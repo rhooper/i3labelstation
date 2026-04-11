@@ -1,0 +1,24 @@
+#pragma once
+
+#include <cstdint>
+#include <cstddef>
+#include "usb_printer.h"
+
+// Brother QL status response (32 bytes)
+struct BrotherQLStatus {
+    uint8_t error_info_1;
+    uint8_t error_info_2;
+    uint8_t media_width;
+    uint8_t media_type;
+    uint8_t media_length;
+    uint8_t status_type;  // 0x00=reply, 0x01=complete, 0x02=error
+    uint8_t phase_type;
+    bool valid;
+};
+
+// Parse a 32-byte status response from the printer.
+BrotherQLStatus brother_ql_parse_status(const uint8_t *data, size_t len);
+
+// Print a label: stream header + raster rows + print command, then read status.
+// framebuffer: 1-bit packed pixel data (MSB first), LABEL_FB_STRIDE * LABEL_PRINTABLE_H bytes.
+bool brother_ql_print(PrinterState *printer, const uint8_t *framebuffer);

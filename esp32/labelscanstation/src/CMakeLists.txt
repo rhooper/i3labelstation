@@ -1,0 +1,22 @@
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "usb_host_task.cpp"
+        "usb_printer.cpp"
+        "brother_ql.cpp"
+        "wifi_manager.cpp"
+        "label_renderer.cpp"
+        "button.cpp"
+        "rfid_reader.cpp"
+        "status_led.cpp"
+    INCLUDE_DIRS "."
+    REQUIRES
+        usb
+        driver
+        esp_wifi
+        esp_netif
+        esp_event
+        nvs_flash
+        lwip
+        esp_timer
+)

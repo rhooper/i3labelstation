@@ -9,6 +9,10 @@ esp32/secrets.yaml
 
 # PlatformIO
 esp32/usb_test/.pio/
+esp32/labelscanstation/.pio/
+
+# Secrets
+esp32/labelscanstation/src/secrets.h
 
 # OS
 .DS_Store
