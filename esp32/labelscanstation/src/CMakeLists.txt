@@ -7,13 +7,13 @@ idf_component_register(
         "ql_models.cpp"
         "wifi_manager.cpp"
         "label_renderer.cpp"
-        "button.cpp"
         "rfid_reader.cpp"
         "status_led.cpp"
         "lcd_display.cpp"
         "card_lookup.cpp"
         "buzzer.cpp"
         "mode_switch.cpp"
+        "led_output.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         usb

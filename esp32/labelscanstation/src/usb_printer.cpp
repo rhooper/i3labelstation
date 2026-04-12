@@ -23,6 +23,16 @@ static void transfer_cb(usb_transfer_t *transfer) {
     xSemaphoreGive(s_xfer_done);
 }
 
+// Safely cancel a timed-out transfer: halt + flush + clear the endpoint,
+// then wait briefly for the halted transfer's callback to fire.
+static void cancel_pending_transfer(PrinterState *state, uint8_t ep_addr) {
+    usb_host_endpoint_halt(state->dev_handle, ep_addr);
+    usb_host_endpoint_flush(state->dev_handle, ep_addr);
+    // Wait for the halted callback to fire so transfer is no longer pending
+    xSemaphoreTake(s_xfer_done, pdMS_TO_TICKS(500));
+    usb_host_endpoint_clear(state->dev_handle, ep_addr);
+}
+
 void printer_init(PrinterState *state) {
     memset(state, 0, sizeof(*state));
     state->interface_number = 0xFF;
@@ -174,6 +184,7 @@ esp_err_t printer_send(PrinterState *state, const uint8_t *data, size_t len) {
         // Wait for completion
         if (xSemaphoreTake(s_xfer_done, pdMS_TO_TICKS(10000)) != pdTRUE) {
             ESP_LOGE(TAG, "Transfer timeout at offset %zu", offset);
+            cancel_pending_transfer(state, state->bulk_out_addr);
             err = ESP_ERR_TIMEOUT;
             break;
         }
@@ -218,6 +229,7 @@ int printer_read_status(PrinterState *state, uint8_t *buf, size_t buf_len) {
 
     if (xSemaphoreTake(s_xfer_done, pdMS_TO_TICKS(10000)) != pdTRUE) {
         ESP_LOGE(TAG, "Read transfer timeout");
+        cancel_pending_transfer(state, state->bulk_in_addr);
         usb_host_transfer_free(xfer);
         return -1;
     }

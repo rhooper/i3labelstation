@@ -10,12 +10,56 @@
 
 static const char *TAG = "brother_ql";
 
+// Protocol command bytes
+static constexpr uint8_t CMD_ESC             = 0x1B;
+static constexpr uint8_t CMD_INIT            = 0x40;  // ESC @
+static constexpr uint8_t CMD_STATUS_INFO     = 0x69;  // ESC i ...
+static constexpr uint8_t CMD_STATUS_REQUEST  = 0x53;  // ESC i S
+static constexpr uint8_t CMD_MODE_SETTING    = 0x4D;  // ESC i M
+static constexpr uint8_t CMD_EXPANDED_MODE   = 0x4B;  // ESC i K
+static constexpr uint8_t CMD_MEDIA_QUALITY   = 0x7A;  // ESC i z
+static constexpr uint8_t CMD_AUTO_CUT        = 0x41;  // ESC i A
+static constexpr uint8_t CMD_MARGINS         = 0x64;  // ESC i d
+static constexpr uint8_t CMD_RASTER          = 0x67;  // g
+static constexpr uint8_t CMD_PRINT           = 0x1A;
+
+// Status header bytes
+static constexpr uint8_t STATUS_HEADER_0     = 0x80;
+static constexpr uint8_t STATUS_HEADER_1     = 0x20;
+static constexpr uint8_t STATUS_HEADER_2     = 0x42;
+
+// Status type values
+static constexpr uint8_t STATUS_REPLY        = 0x00;
+static constexpr uint8_t STATUS_COMPLETE     = 0x01;
+static constexpr uint8_t STATUS_ERROR        = 0x02;
+static constexpr uint8_t STATUS_NOTIFICATION = 0x05;
+static constexpr uint8_t STATUS_PHASE_CHANGE = 0x06;
+
+// Media type values
+static constexpr uint8_t MEDIA_NONE          = 0x00;
+static constexpr uint8_t MEDIA_CONTINUOUS    = 0x0A;
+static constexpr uint8_t MEDIA_DIE_CUT       = 0x0B;
+
+// Mode setting flags
+static constexpr uint8_t MODE_AUTO_CUT       = 0x40;  // bit 6
+
+// Media/quality valid flags
+static constexpr uint8_t VALID_PI            = 0x80;  // bit 7
+static constexpr uint8_t VALID_QUALITY       = 0x40;  // bit 6
+static constexpr uint8_t VALID_LENGTH        = 0x08;  // bit 3
+static constexpr uint8_t VALID_WIDTH         = 0x04;  // bit 2
+static constexpr uint8_t VALID_MEDIA_TYPE    = 0x02;  // bit 1
+
+// Maximum bytes_per_row across all Brother QL models
+static constexpr uint8_t MAX_BYTES_PER_ROW   = 90;
+
 // Buffer for building commands (reused per call).
 // Must be large enough for max invalidate (400) + protocol commands.
-static uint8_t s_cmd_buf[512];
+static constexpr size_t CMD_BUF_SIZE = 512;
+static uint8_t s_cmd_buf[CMD_BUF_SIZE];
 
 // Phase 1: invalidate + init + status request (sent before reading status)
-static size_t build_init_cmd(uint8_t *buf, const ql_model_t *model) {
+static size_t build_init_cmd(uint8_t *buf, size_t buf_size, const ql_model_t *model) {
     size_t pos = 0;
 
     // Invalidate: null bytes (200 for older models, 400 for QL-800+)
@@ -23,49 +67,48 @@ static size_t build_init_cmd(uint8_t *buf, const ql_model_t *model) {
     pos += model->num_invalidate;
 
     // Initialize: ESC @
-    buf[pos++] = 0x1B;
-    buf[pos++] = 0x40;
+    buf[pos++] = CMD_ESC;
+    buf[pos++] = CMD_INIT;
 
     // Status request: ESC i S
-    buf[pos++] = 0x1B;
-    buf[pos++] = 0x69;
-    buf[pos++] = 0x53;
+    buf[pos++] = CMD_ESC;
+    buf[pos++] = CMD_STATUS_INFO;
+    buf[pos++] = CMD_STATUS_REQUEST;
 
+    configASSERT(pos <= buf_size);
     return pos;
 }
 
 // Phase 2: mode/media/margins setup (sent after reading status, with detected media type)
-static size_t build_print_setup(uint8_t *buf, const ql_model_t *model,
+static size_t build_print_setup(uint8_t *buf, size_t buf_size, const ql_model_t *model,
                                 uint8_t media_type, uint8_t media_width_mm,
                                 uint8_t media_length_mm) {
     size_t pos = 0;
 
     // Mode setting: ESC i M (models that support it)
     if (model->mode_setting) {
-        buf[pos++] = 0x1B;
-        buf[pos++] = 0x69;
-        buf[pos++] = 0x4D;
-        buf[pos++] = model->cutting ? 0x40 : 0x00;  // bit 6 = auto-cut
+        buf[pos++] = CMD_ESC;
+        buf[pos++] = CMD_STATUS_INFO;
+        buf[pos++] = CMD_MODE_SETTING;
+        buf[pos++] = model->cutting ? MODE_AUTO_CUT : 0x00;
     }
 
     // Expanded mode: ESC i K (models that support it)
     if (model->expanded_mode) {
-        buf[pos++] = 0x1B;
-        buf[pos++] = 0x69;
-        buf[pos++] = 0x4B;
+        buf[pos++] = CMD_ESC;
+        buf[pos++] = CMD_STATUS_INFO;
+        buf[pos++] = CMD_EXPANDED_MODE;
         buf[pos++] = 0x00;  // no cut-every-N, no mirror
     }
 
     // Media/quality: ESC i z + 10 bytes
-    buf[pos++] = 0x1B;
-    buf[pos++] = 0x69;
-    buf[pos++] = 0x7A;
+    buf[pos++] = CMD_ESC;
+    buf[pos++] = CMD_STATUS_INFO;
+    buf[pos++] = CMD_MEDIA_QUALITY;
 
-    // Valid flags: bit 7 = PI (always), bit 6 = quality, bit 2 = width, bit 1 = media type
-    uint8_t valid_flags = 0x80 | (1 << 6) | (1 << 2) | (1 << 1);
-    // bit 3 = length valid — only for die-cut labels
-    if (media_type == 0x0B && media_length_mm > 0)
-        valid_flags |= (1 << 3);
+    uint8_t valid_flags = VALID_PI | VALID_QUALITY | VALID_WIDTH | VALID_MEDIA_TYPE;
+    if (media_type == MEDIA_DIE_CUT && media_length_mm > 0)
+        valid_flags |= VALID_LENGTH;
     buf[pos++] = valid_flags;
     buf[pos++] = media_type;
     buf[pos++] = media_width_mm;
@@ -81,25 +124,26 @@ static size_t build_print_setup(uint8_t *buf, const ql_model_t *model,
 
     // Auto-cut: ESC i A (models with cutting capability)
     if (model->cutting) {
-        buf[pos++] = 0x1B;
-        buf[pos++] = 0x69;
-        buf[pos++] = 0x41;
+        buf[pos++] = CMD_ESC;
+        buf[pos++] = CMD_STATUS_INFO;
+        buf[pos++] = CMD_AUTO_CUT;
         buf[pos++] = 0x01;  // cut every 1 label
     }
 
     // Margins: ESC i d + 2 bytes
-    buf[pos++] = 0x1B;
-    buf[pos++] = 0x69;
-    buf[pos++] = 0x64;
+    buf[pos++] = CMD_ESC;
+    buf[pos++] = CMD_STATUS_INFO;
+    buf[pos++] = CMD_MARGINS;
     buf[pos++] = LABEL_FEED_MARGIN & 0xFF;
     buf[pos++] = (LABEL_FEED_MARGIN >> 8) & 0xFF;
 
+    configASSERT(pos <= buf_size);
     return pos;
 }
 
 // Build one raster row command into buf. Returns length (3 + bytes_per_row).
 static size_t build_raster_row(uint8_t *buf, const uint8_t *framebuffer, uint16_t y, uint8_t bytes_per_row) {
-    uint8_t raster_row[bytes_per_row];
+    uint8_t raster_row[MAX_BYTES_PER_ROW];
     memset(raster_row, 0, bytes_per_row);
 
     uint16_t raster_width_px = bytes_per_row * 8;
@@ -116,7 +160,7 @@ static size_t build_raster_row(uint8_t *buf, const uint8_t *framebuffer, uint16_
     }
 
     // Header
-    buf[0] = 0x67;
+    buf[0] = CMD_RASTER;
     buf[1] = 0x00;
     buf[2] = bytes_per_row;
 
@@ -143,9 +187,9 @@ static void log_status_hex(const uint8_t *data, size_t len) {
 
 static const char *media_type_str(uint8_t t) {
     switch (t) {
-        case 0x00: return "no-media";
-        case 0x0A: return "continuous";
-        case 0x0B: return "die-cut";
+        case MEDIA_NONE:       return "no-media";
+        case MEDIA_CONTINUOUS: return "continuous";
+        case MEDIA_DIE_CUT:    return "die-cut";
         default: return "unknown";
     }
 }
@@ -153,11 +197,11 @@ static const char *media_type_str(uint8_t t) {
 static void log_status_detail(const BrotherQLStatus &s) {
     const char *type_str = "unknown";
     switch (s.status_type) {
-        case 0x00: type_str = "status-reply"; break;
-        case 0x01: type_str = "print-complete"; break;
-        case 0x02: type_str = "error"; break;
-        case 0x05: type_str = "notification"; break;
-        case 0x06: type_str = "phase-change"; break;
+        case STATUS_REPLY:        type_str = "status-reply"; break;
+        case STATUS_COMPLETE:     type_str = "print-complete"; break;
+        case STATUS_ERROR:        type_str = "error"; break;
+        case STATUS_NOTIFICATION: type_str = "notification"; break;
+        case STATUS_PHASE_CHANGE: type_str = "phase-change"; break;
     }
     ESP_LOGI(TAG, "  type=%s(0x%02X) phase=0x%02X media=%s(0x%02X) width=%dmm length=%dmm",
              type_str, s.status_type, s.phase_type,
@@ -203,7 +247,7 @@ BrotherQLStatus brother_ql_parse_status(const uint8_t *data, size_t len) {
 
     if (len < 32)
         return status;
-    if (data[0] != 0x80 || data[1] != 0x20 || data[2] != 0x42)
+    if (data[0] != STATUS_HEADER_0 || data[1] != STATUS_HEADER_1 || data[2] != STATUS_HEADER_2)
         return status;
 
     status.error_info_1 = data[8];
@@ -231,8 +275,15 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
              model->num_invalidate, model->mode_setting, model->expanded_mode,
              model->cutting, model->two_color, model->bytes_per_row);
 
+    uint8_t bytes_per_row = model->bytes_per_row;
+    if (bytes_per_row > MAX_BYTES_PER_ROW) {
+        ESP_LOGE(TAG, "bytes_per_row %d exceeds max %d", bytes_per_row, MAX_BYTES_PER_ROW);
+        set_error(error_msg, error_msg_len, "BAD MODEL CFG");
+        return false;
+    }
+
     // Phase 1: Send invalidate + init + status request
-    size_t init_len = build_init_cmd(s_cmd_buf, model);
+    size_t init_len = build_init_cmd(s_cmd_buf, CMD_BUF_SIZE, model);
     ESP_LOGI(TAG, "Sending init (%zu bytes)...", init_len);
     esp_err_t err = printer_send(printer, s_cmd_buf, init_len);
     if (err != ESP_OK) {
@@ -259,14 +310,14 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
             ESP_LOGI(TAG, "Printer status:");
             log_status_detail(init_status);
 
-            if (init_status.status_type == 0x02) {
+            if (init_status.status_type == STATUS_ERROR) {
                 ESP_LOGE(TAG, "Printer error before print — aborting");
                 format_error_msg(init_status, error_msg ? error_msg : (char*)"", error_msg_len);
                 return false;
             }
 
             // Auto-detect media from printer status
-            if (init_status.media_type != 0x00) {
+            if (init_status.media_type != MEDIA_NONE) {
                 media_type = init_status.media_type;
                 ESP_LOGI(TAG, "Detected media: %s", media_type_str(media_type));
             }
@@ -276,7 +327,7 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
             }
 
             // For continuous media, length = 0 in the command (raster line count determines length)
-            if (media_type == 0x0A) {
+            if (media_type == MEDIA_CONTINUOUS) {
                 media_length = 0;
                 ESP_LOGI(TAG, "Continuous media: using length=0, %d raster lines (~%dmm)",
                          LABEL_PRINTABLE_H, LABEL_HEIGHT_MM);
@@ -291,7 +342,7 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
     // Phase 2: Send print setup with detected media parameters
     ESP_LOGI(TAG, "Sending setup: media=%s(0x%02X) width=%d length=%d",
              media_type_str(media_type), media_type, media_width, media_length);
-    size_t setup_len = build_print_setup(s_cmd_buf, model, media_type, media_width, media_length);
+    size_t setup_len = build_print_setup(s_cmd_buf, CMD_BUF_SIZE, model, media_type, media_width, media_length);
     ESP_LOGI(TAG, "Sending print setup (%zu bytes)...", setup_len);
     err = printer_send(printer, s_cmd_buf, setup_len);
     if (err != ESP_OK) {
@@ -300,10 +351,8 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
         return false;
     }
 
-    uint8_t bytes_per_row = model->bytes_per_row;
-
     // Send raster data row by row
-    uint8_t row_buf[3 + bytes_per_row];
+    uint8_t row_buf[3 + MAX_BYTES_PER_ROW];
     ESP_LOGI(TAG, "Sending %d raster rows (%d bytes/row)...", LABEL_PRINTABLE_H, bytes_per_row);
     for (uint16_t y = 0; y < LABEL_PRINTABLE_H; y++) {
         size_t row_len = build_raster_row(row_buf, framebuffer, y, bytes_per_row);
@@ -318,8 +367,8 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
         }
     }
 
-    // Send print command (0x1A = print without cut)
-    uint8_t print_cmd = 0x1A;
+    // Send print command
+    uint8_t print_cmd = CMD_PRINT;
     ESP_LOGI(TAG, "Sending print command 0x%02X", print_cmd);
     err = printer_send(printer, &print_cmd, 1);
     if (err != ESP_OK) {
@@ -334,7 +383,11 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
         n = printer_read_status(printer, status_buf, sizeof(status_buf));
         if (n < 0) {
             ESP_LOGW(TAG, "Status read failed (attempt %d)", attempts);
-            if (attempts >= 2) return true;  // data was sent, assume success
+            if (attempts >= 2) {
+                ESP_LOGE(TAG, "Status read failed 3 times, reporting failure");
+                set_error(error_msg, error_msg_len, "NO RESPONSE");
+                return false;
+            }
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
@@ -348,12 +401,12 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
 
         log_status_detail(status);
 
-        if (status.status_type == 0x01) {
+        if (status.status_type == STATUS_COMPLETE) {
             ESP_LOGI(TAG, "Print completed successfully");
             return true;
         }
 
-        if (status.status_type == 0x02) {
+        if (status.status_type == STATUS_ERROR) {
             ESP_LOGE(TAG, "Printer error after print:");
             log_status_detail(status);
             format_error_msg(status, error_msg ? error_msg : (char*)"", error_msg_len);
@@ -364,6 +417,7 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
-    ESP_LOGW(TAG, "No completion status after 10 reads, assuming success");
-    return true;
+    ESP_LOGW(TAG, "No completion status after 10 reads");
+    set_error(error_msg, error_msg_len, "NO RESPONSE");
+    return false;
 }

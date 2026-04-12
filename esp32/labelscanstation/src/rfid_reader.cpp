@@ -70,17 +70,11 @@ QueueHandle_t rfid_init() {
     uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
     uart_config.source_clk = UART_SCLK_DEFAULT;
 
-    esp_err_t err;
-    err = uart_driver_install(RFID_UART_NUM, UART_BUF_SIZE * 2, 0, 0, nullptr, 0);
-    ESP_LOGI(TAG, "uart_driver_install: %s", esp_err_to_name(err));
-
-    err = uart_param_config(RFID_UART_NUM, &uart_config);
-    ESP_LOGI(TAG, "uart_param_config: %s", esp_err_to_name(err));
-
+    ESP_ERROR_CHECK(uart_driver_install(RFID_UART_NUM, UART_BUF_SIZE * 2, 0, 0, nullptr, 0));
+    ESP_ERROR_CHECK(uart_param_config(RFID_UART_NUM, &uart_config));
     // RX only — TX pin not used (-1)
-    err = uart_set_pin(RFID_UART_NUM, UART_PIN_NO_CHANGE, RFID_UART_RX_GPIO,
-                       UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    ESP_LOGI(TAG, "uart_set_pin(RX=GPIO%d): %s", RFID_UART_RX_GPIO, esp_err_to_name(err));
+    ESP_ERROR_CHECK(uart_set_pin(RFID_UART_NUM, UART_PIN_NO_CHANGE, RFID_UART_RX_GPIO,
+                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
     s_card_queue = xQueueCreate(4, sizeof(uint32_t));
     xTaskCreate(rfid_task, "rfid_task", 4096, nullptr, 2, nullptr);

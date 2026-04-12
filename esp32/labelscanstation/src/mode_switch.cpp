@@ -1,8 +1,7 @@
 #include "mode_switch.h"
+#include "app_config.h"
 #include "driver/gpio.h"
-
-#define MODE_PIN1 GPIO_NUM_37
-#define MODE_PIN2 GPIO_NUM_36
+#include "esp_check.h"
 
 void mode_switch_init() {
     gpio_config_t cfg = {};
@@ -11,7 +10,7 @@ void mode_switch_init() {
     cfg.pin_bit_mask = (1ULL << MODE_PIN1) | (1ULL << MODE_PIN2);
     cfg.pull_up_en = GPIO_PULLUP_ENABLE;
     cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    gpio_config(&cfg);
+    ESP_ERROR_CHECK(gpio_config(&cfg));
 }
 
 uint8_t mode_switch_read() {
