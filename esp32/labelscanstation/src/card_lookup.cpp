@@ -1,4 +1,5 @@
 #include "card_lookup.h"
+#include "extra_cards.h"
 #include "secrets.h"
 
 #include <cstring>
@@ -24,8 +25,31 @@ static card_entry_t *s_cards = nullptr;
 static int s_card_count = 0;
 static int s_card_capacity = 0;
 
+static bool add_entry(card_entry_t **cards, int *count, int *capacity,
+                      uint32_t card_id, const char *name);
+
+// Merge compiled-in extra_cards[] into the dynamic DB (skips duplicates)
+static void merge_extra_cards() {
+    for (int i = 0; i < EXTRA_CARD_COUNT; i++) {
+        // Check for duplicate
+        bool dup = false;
+        for (int j = 0; j < s_card_count; j++) {
+            if (s_cards[j].card_id == extra_cards[i].card_id) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) {
+            add_entry(&s_cards, &s_card_count, &s_card_capacity,
+                      extra_cards[i].card_id, extra_cards[i].name);
+        }
+    }
+}
+
 void card_lookup_init() {
-    ESP_LOGI(TAG, "Card lookup initialized (empty until API refresh)");
+    // Load compiled-in extra cards immediately (works before WiFi)
+    merge_extra_cards();
+    ESP_LOGI(TAG, "Card lookup initialized (%d extra entries)", s_card_count);
 }
 
 int card_lookup_count() {
@@ -265,7 +289,8 @@ bool card_lookup_refresh() {
         s_cards = new_cards;
         s_card_count = new_count;
         s_card_capacity = new_capacity;
-        ESP_LOGI(TAG, "Loaded %d card entries from API", s_card_count);
+        merge_extra_cards();
+        ESP_LOGI(TAG, "Loaded %d card entries (%d from API + extras)", s_card_count, new_count);
         return true;
     }
 

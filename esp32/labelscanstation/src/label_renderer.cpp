@@ -6,6 +6,7 @@
 #include "stb_truetype.h"
 
 #include "label_renderer.h"
+#include "card_lookup.h"
 #include "app_config.h"
 #include "i3logo.h"
 #include "roboto_bold.h"
@@ -25,8 +26,9 @@ static bool s_font_ready = false;
 // Font pixel heights (user spec: 15mm name, 8mm date on 29mm wide label)
 // User reported 2x too large, so halve: ~7.5mm name, ~4mm date
 // 306px / 29mm = 10.55 px/mm
-#define NAME_PX_HEIGHT  111  // ~10.5mm
+#define NAME_PX_HEIGHT  127  // ~12mm
 #define DATE_PX_HEIGHT  63   // ~6mm
+#define TIME_PX_HEIGHT  42   // ~4mm
 
 // Set a pixel in the 1-bit framebuffer
 static inline void set_pixel(int x, int y) {
@@ -54,7 +56,35 @@ static void blit_glyph_rotated(const uint8_t *bitmap, int bw, int bh,
     }
 }
 
-// Render a string rotated 90° CCW using stb_truetype.
+// Decode one UTF-8 codepoint from *p, advance *p past it. Returns codepoint or 0xFFFD on error.
+static int utf8_decode(const char **p) {
+    const uint8_t *s = (const uint8_t *)*p;
+    int ch;
+    if (s[0] < 0x80) {
+        ch = s[0];
+        *p += 1;
+    } else if ((s[0] & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+        ch = ((s[0] & 0x1F) << 6) | (s[1] & 0x3F);
+        *p += 2;
+    } else if ((s[0] & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+        ch = ((s[0] & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+        *p += 3;
+    } else if ((s[0] & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
+        ch = ((s[0] & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+        *p += 4;
+    } else {
+        ch = 0xFFFD;  // replacement character
+        *p += 1;
+    }
+    return ch;
+}
+
+// Peek at next UTF-8 codepoint without advancing
+static int utf8_peek_next(const char *p) {
+    return utf8_decode(&p);
+}
+
+// Render a string rotated 90° CCW using stb_truetype (UTF-8 input).
 // fb_x: baseline x-position in framebuffer (text extends upward from here)
 // fb_y: starting y-position (text advances in +y direction)
 // Returns the total advance in fb y-pixels.
@@ -65,7 +95,8 @@ static int render_string_rot(const char *str, float scale, int fb_x, int fb_y) {
     float x_pos = 0;
     const char *p = str;
     while (*p) {
-        int ch = (unsigned char)*p;
+        const char *next = p;
+        int ch = utf8_decode(&next);
         int advance, lsb;
         stbtt_GetCodepointHMetrics(&s_font, ch, &advance, &lsb);
 
@@ -88,12 +119,33 @@ static int render_string_rot(const char *str, float scale, int fb_x, int fb_y) {
 
         x_pos += advance * scale;
 
-        // Kerning
-        if (*(p + 1)) {
-            int kern = stbtt_GetCodepointKernAdvance(&s_font, ch, (unsigned char)*(p + 1));
+        // Kerning with next character
+        if (*next) {
+            int next_ch = utf8_peek_next(next);
+            int kern = stbtt_GetCodepointKernAdvance(&s_font, ch, next_ch);
             x_pos += kern * scale;
         }
-        p++;
+        p = next;
+    }
+    return (int)(x_pos + 0.5f);
+}
+
+// Measure string width in pixels at given scale (UTF-8 input)
+static int measure_string(const char *str, float scale) {
+    float x_pos = 0;
+    const char *p = str;
+    while (*p) {
+        const char *next = p;
+        int ch = utf8_decode(&next);
+        int advance, lsb;
+        stbtt_GetCodepointHMetrics(&s_font, ch, &advance, &lsb);
+        x_pos += advance * scale;
+        if (*next) {
+            int next_ch = utf8_peek_next(next);
+            int kern = stbtt_GetCodepointKernAdvance(&s_font, ch, next_ch);
+            x_pos += kern * scale;
+        }
+        p = next;
     }
     return (int)(x_pos + 0.5f);
 }
@@ -140,6 +192,7 @@ const uint8_t *label_renderer_render(const char *name) {
     // Compute font scales from pixel heights
     float name_scale = stbtt_ScaleForPixelHeight(&s_font, NAME_PX_HEIGHT);
     float date_scale = stbtt_ScaleForPixelHeight(&s_font, DATE_PX_HEIGHT);
+    float time_scale = stbtt_ScaleForPixelHeight(&s_font, TIME_PX_HEIGHT);
 
     // Logo — rotated 90° CCW, 2x scaled, centered across label width
     // After rotation at 2x: occupies I3LOGO_HEIGHT*2 px in x, I3LOGO_WIDTH*2 px in y
@@ -155,16 +208,62 @@ const uint8_t *label_renderer_render(const char *name) {
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &line_gap);
 
-    // Name — near top of label (high fb_x)
-    int name_ascent_px = (int)(ascent * name_scale + 0.5f);
+    // Name — top-aligned, with word wrapping if too long
     int name_descent_px = (int)(-descent * name_scale + 0.5f);
-    int name_top_margin = 15;  // px from top edge
+    int name_line_height = (int)((ascent - descent) * name_scale + 0.5f);
+    int name_top_margin = 15;
     int name_fb_x = LABEL_PRINTABLE_W - name_top_margin - name_descent_px;
-    render_string_rot(name, name_scale, name_fb_x, text_y_start);
+    int max_line_width = LABEL_PRINTABLE_H - text_y_start - 20;
 
-    // Date — bottom-aligned to label edge, left-justified
+    // Word-wrap: split on spaces, measure words, break lines
+    {
+        char name_buf[LOOKUP_NAME_MAX];
+        strncpy(name_buf, name, sizeof(name_buf) - 1);
+        name_buf[sizeof(name_buf) - 1] = '\0';
+
+        // Collect words
+        const char *words[16];
+        int word_count = 0;
+        char *saveptr;
+        char *tok = strtok_r(name_buf, " ", &saveptr);
+        while (tok && word_count < 16) {
+            words[word_count++] = tok;
+            tok = strtok_r(nullptr, " ", &saveptr);
+        }
+
+        int space_width = measure_string(" ", name_scale);
+        int cur_fb_x = name_fb_x;
+        int line_start = 0;
+
+        while (line_start < word_count) {
+            // Build a line by adding words until it overflows
+            char line[LOOKUP_NAME_MAX] = {};
+            int line_width = 0;
+            int line_end = line_start;
+
+            for (int i = line_start; i < word_count; i++) {
+                int w = measure_string(words[i], name_scale);
+                int trial = (i == line_start) ? w : line_width + space_width + w;
+                if (trial > max_line_width && i > line_start)
+                    break;
+                if (i > line_start) {
+                    strcat(line, " ");
+                    line_width += space_width;
+                }
+                strcat(line, words[i]);
+                line_width += w;
+                line_end = i + 1;
+            }
+
+            render_string_rot(line, name_scale, cur_fb_x, text_y_start);
+            cur_fb_x -= name_line_height + 5;  // 5px line gap
+            line_start = line_end;
+        }
+    }
+
+    // Date — bottom-left
     int date_ascent_px = (int)(ascent * date_scale + 0.5f);
-    int date_bottom_margin = 5;  // px from bottom edge
+    int date_bottom_margin = 5;
     int date_fb_x = date_ascent_px + date_bottom_margin;
 
     time_t now;
@@ -179,7 +278,26 @@ const uint8_t *label_renderer_render(const char *name) {
     }
     render_string_rot(date_str, date_scale, date_fb_x, text_y_start);
 
-    ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + logo", name, date_str);
+    // Time — bottom-right, smaller font, "HH:MM am" format
+    if (timeinfo.tm_year > (2020 - 1900)) {
+        char time_str[16];
+        int hour12 = timeinfo.tm_hour % 12;
+        if (hour12 == 0) hour12 = 12;
+        const char *ampm = timeinfo.tm_hour < 12 ? "am" : "pm";
+        snprintf(time_str, sizeof(time_str), "%d:%02d %s", hour12, timeinfo.tm_min, ampm);
+
+        int time_ascent_px = (int)(ascent * time_scale + 0.5f);
+        int time_fb_x = time_ascent_px + date_bottom_margin;
+        int time_width = measure_string(time_str, time_scale);
+        int right_margin = 20;
+        int time_fb_y = LABEL_PRINTABLE_H - time_width - right_margin;
+        render_string_rot(time_str, time_scale, time_fb_x, time_fb_y);
+
+        ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + '%s' + logo", name, date_str, time_str);
+    } else {
+        ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + logo", name, date_str);
+    }
+
     return s_framebuffer;
 }
 

@@ -42,9 +42,14 @@ static portMUX_TYPE s_lcd_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void lcd_override(int line, const char *text, int duration_ms) {
     taskENTER_CRITICAL(&s_lcd_mux);
+    // Clear the other line if the previous override has expired
+    int64_t now = esp_timer_get_time();
+    if (now >= s_lcd_override_until) {
+        s_lcd_override[0][0] = '\0';
+        s_lcd_override[1][0] = '\0';
+    }
     strncpy(s_lcd_override[line], text, 16);
     s_lcd_override[line][16] = '\0';
-    int64_t now = esp_timer_get_time();
     int64_t until = now + (int64_t)duration_ms * 1000;
     if (until > s_lcd_override_until)
         s_lcd_override_until = until;
