@@ -12,6 +12,7 @@ static const char *TAG = "usb_host";
 static usb_phy_handle_t s_phy_handle = nullptr;
 static usb_host_client_handle_t s_client_handle = nullptr;
 static usb_printer_event_cb_t s_printer_cb = nullptr;
+static usb_device_handle_t s_printer_dev_handle = nullptr;
 
 static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg) {
     switch (event_msg->event) {
@@ -33,9 +34,12 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
             if (desc->idVendor == BROTHER_QL_VID && desc->idProduct == BROTHER_QL_PID) {
                 ESP_LOGI(TAG, "Brother QL-500 detected!");
                 if (s_printer_cb) {
+                    s_printer_dev_handle = dev_handle;
                     s_printer_cb(dev_handle, true);
                     return;  // don't close — printer_on_connected takes ownership
                 }
+            } else if (desc->bDeviceClass == 0x09) {
+                ESP_LOGI(TAG, "USB Hub detected (will enumerate downstream devices)");
             }
         }
 
@@ -48,8 +52,10 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
         break;
     }
     case USB_HOST_CLIENT_EVENT_DEV_GONE:
-        ESP_LOGW(TAG, "USB device disconnected");
-        if (s_printer_cb) {
+        ESP_LOGW(TAG, "USB device disconnected (handle=%p, printer=%p)",
+                 event_msg->dev_gone.dev_hdl, s_printer_dev_handle);
+        if (s_printer_cb && event_msg->dev_gone.dev_hdl == s_printer_dev_handle) {
+            s_printer_dev_handle = nullptr;
             s_printer_cb(nullptr, false);
         }
         break;
