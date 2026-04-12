@@ -9,6 +9,9 @@ idf_component_register(
         "button.cpp"
         "rfid_reader.cpp"
         "status_led.cpp"
+        "lcd_display.cpp"
+        "card_lookup.cpp"
+        "buzzer.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         usb

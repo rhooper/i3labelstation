@@ -38,5 +38,15 @@
 // WiFi (from secrets.h)
 // #define WIFI_SSID and WIFI_PASS in secrets.h
 
+// I2C LCD (HD44780 via PCF8574 backpack)
+// YD-ESP32-S3 docs: GPIO8=SDA, GPIO9=SCL
+// If display doesn't work, the driver auto-tries swapped pins.
+#define LCD_SDA_GPIO        8
+#define LCD_SCL_GPIO        9
+#define LCD_I2C_PORT        I2C_NUM_0
+
+// Buzzer (passive piezo via PWM)
+#define BUZZER_GPIO         GPIO_NUM_38
+
 // USB transfer
 #define USB_XFER_SIZE       64

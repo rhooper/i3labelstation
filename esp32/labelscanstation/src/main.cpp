@@ -4,12 +4,88 @@
 #include "brother_ql.h"
 #include "wifi_manager.h"
 #include "label_renderer.h"
-#include "button.h"
+// button.h no longer used — GPIO polled directly for long-press
 #include "rfid_reader.h"
 #include "status_led.h"
+#include "lcd_display.h"
+#include "card_lookup.h"
+#include "buzzer.h"
 
 #include <cstring>
 #include <cstdio>
+
+// Nyancat easter egg card
+#define NYANCAT_CARD_ID 805446808
+
+// Nyancat custom LCD glyphs — 6 chars for the cat sprite (2 rows × 3 cols)
+// Top row: tail, body/poptart, head+ears
+// Bot row: tail, legs, head
+// Plus 2 rainbow chars
+static const uint8_t nyan_top_tail[8]  = {0x00, 0x01, 0x03, 0x07, 0x07, 0x07, 0x03, 0x01};
+static const uint8_t nyan_top_body[8]  = {0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F};
+static const uint8_t nyan_top_head[8]  = {0x11, 0x1B, 0x1F, 0x15, 0x1F, 0x0E, 0x1F, 0x1F};
+static const uint8_t nyan_bot_tail[8]  = {0x01, 0x03, 0x07, 0x03, 0x01, 0x00, 0x00, 0x00};
+static const uint8_t nyan_bot_body1[8] = {0x1F, 0x1F, 0x00, 0x0A, 0x0A, 0x00, 0x00, 0x00};
+static const uint8_t nyan_bot_body2[8] = {0x1F, 0x1F, 0x00, 0x14, 0x14, 0x00, 0x00, 0x00};
+static const uint8_t nyan_bot_head[8]  = {0x1F, 0x1E, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00};
+static const uint8_t nyan_rainbow[8]   = {0x00, 0x1F, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00};
+
+// Nyancat walks across 16-col LCD. Cat is 4 chars wide (tail, body, body, head).
+// Rainbow trail fills behind it. Animation runs as a blocking loop.
+static void lcd_show_nyancat_walk() {
+    // Load custom chars: 0=tail-top, 1=body-top, 2=head-top,
+    // 3=tail-bot, 4=legs(frame), 5=head-bot, 6=rainbow
+    lcd_create_char(0, nyan_top_tail);
+    lcd_create_char(1, nyan_top_body);
+    lcd_create_char(2, nyan_top_head);
+    lcd_create_char(3, nyan_bot_tail);
+    // start with legs frame 1
+    lcd_create_char(4, nyan_bot_body1);
+    lcd_create_char(5, nyan_bot_head);
+    lcd_create_char(6, nyan_rainbow);
+
+    // Cat sprite: 6 chars wide
+    // top: \x00 \x01 \x01 \x01 \x01 \x02
+    // bot: \x03 \x04 \x01 \x01 \x04 \x05
+    #define NYAN_WIDTH 6
+
+    char line0[17];
+    char line1[17];
+
+    // Walk from off-left to off-right
+    for (int pos = -NYAN_WIDTH; pos <= 16; pos++) {
+        // Alternate legs each frame
+        if (pos % 2 == 0)
+            lcd_create_char(4, nyan_bot_body1);
+        else
+            lcd_create_char(4, nyan_bot_body2);
+
+        // Build lines
+        for (int i = 0; i < 16; i++) {
+            int ci = i - pos;  // char index within sprite
+            if (ci >= 0 && ci < NYAN_WIDTH) {
+                static const char top_chars[] = {'\x00', '\x01', '\x01', '\x01', '\x01', '\x02'};
+                static const char bot_chars[] = {'\x03', '\x04', '\x01', '\x01', '\x04', '\x05'};
+                line0[i] = top_chars[ci];
+                line1[i] = bot_chars[ci];
+            } else if (i < pos) {
+                // Rainbow trail behind cat
+                line0[i] = '\x06';
+                line1[i] = '\x06';
+            } else {
+                line0[i] = ' ';
+                line1[i] = ' ';
+            }
+        }
+        line0[16] = '\0';
+        line1[16] = '\0';
+
+        lcd_set_line(0, line0);
+        lcd_set_line(1, line1);
+        vTaskDelay(pdMS_TO_TICKS(150));
+    }
+}
+#include <ctime>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -20,13 +96,33 @@ static const char *TAG = "main";
 
 static PrinterState s_printer;
 
-// Print queue carries a card ID string
-#define CARD_ID_MAX_LEN 20
+// Print queue carries the looked-up name
 typedef struct {
-    char card_id[CARD_ID_MAX_LEN];
+    char name[LOOKUP_NAME_MAX];
 } print_msg_t;
 
 static QueueHandle_t s_print_queue = nullptr;
+
+// Transient LCD override (e.g. "Printing...", card scan feedback)
+static char s_lcd_override[2][17] = {};  // [line][text], 16 chars + NUL
+static int64_t s_lcd_override_until = 0; // microsecond timestamp
+static bool s_lcd_raw_override = false;  // true = don't touch LCD during override (custom glyphs)
+
+static void lcd_override(int line, const char *text, int duration_ms) {
+    strncpy(s_lcd_override[line], text, 16);
+    s_lcd_override[line][16] = '\0';
+    int64_t now = esp_timer_get_time();
+    int64_t until = now + (int64_t)duration_ms * 1000;
+    if (until > s_lcd_override_until)
+        s_lcd_override_until = until;
+}
+
+static bool lcd_override_active() {
+    if (esp_timer_get_time() < s_lcd_override_until)
+        return true;
+    s_lcd_raw_override = false;
+    return false;
+}
 
 static void on_printer_event(usb_device_handle_t dev_handle, bool connected) {
     if (connected) {
@@ -54,25 +150,32 @@ static void print_task(void *arg) {
             continue;
         }
 
-        ESP_LOGI(TAG, "Print requested — rendering label for '%s'...", msg.card_id);
-        const uint8_t *fb = label_renderer_render(msg.card_id);
+        ESP_LOGI(TAG, "Print requested — rendering label for '%s'...", msg.name);
+        lcd_override(0, "PRINTING...", 5000);
+        lcd_override(1, msg.name, 5000);
+        const uint8_t *fb = label_renderer_render(msg.name);
         if (fb == nullptr) {
             ESP_LOGE(TAG, "Render failed");
+            lcd_override(0, "RENDER ERROR", 3000);
             continue;
         }
 
         ESP_LOGI(TAG, "Sending to printer...");
         bool ok = brother_ql_print(&s_printer, fb);
         ESP_LOGI(TAG, "Print %s", ok ? "succeeded" : "FAILED");
+        if (!ok) {
+            lcd_override(0, "PRINT FAILED!", 3000);
+        }
+        // On success, override expires and normal status resumes
     }
 }
 
 // Dedup: ignore same card ID if scanned within 10s of starting a print
-#define DEDUP_INTERVAL_US (10 * 1000000LL)  // 10 seconds in microseconds
+#define DEDUP_INTERVAL_US (10 * 1000000LL)
 static uint32_t s_last_card_id = 0;
 static int64_t  s_last_print_time = 0;
 
-static void enqueue_print(uint32_t card_id) {
+static void enqueue_print(uint32_t card_id, const char *name) {
     int64_t now = esp_timer_get_time();
     if (card_id == s_last_card_id && (now - s_last_print_time) < DEDUP_INTERVAL_US) {
         ESP_LOGI(TAG, "Ignoring duplicate card 0x%08lX (within 10s)", (unsigned long)card_id);
@@ -83,8 +186,88 @@ static void enqueue_print(uint32_t card_id) {
     s_last_print_time = now;
 
     print_msg_t msg;
-    snprintf(msg.card_id, sizeof(msg.card_id), "0x%08lX", (unsigned long)card_id);
+    strncpy(msg.name, name, sizeof(msg.name) - 1);
+    msg.name[sizeof(msg.name) - 1] = '\0';
     xQueueSend(s_print_queue, &msg, 0);
+}
+
+// Returns status string for line 1, or NULL if ready (SCAN CARD).
+// First boot: "NETWORKING..." until WiFi+NTP succeed.
+// After that, real errors with precedence: NO WIFI > NO NTP > NO PRINTER
+static const char *get_status_line() {
+    bool first_boot = !sntp_is_synced() && !wifi_ever_connected();
+    bool first_ntp = wifi_is_connected() && !sntp_is_synced();
+    if (first_boot || first_ntp)    return "NETWORKING...";
+    if (!wifi_is_connected())       return "ERR: NO WIFI";
+    if (!sntp_is_synced())          return "ERR: NO NTP";
+    if (!s_printer.connected)       return "ERR: NO PRINTER";
+    // Future: OUT OF PAPER, PRINTER ERROR from status polling
+    return nullptr;
+}
+
+// Format clock line for line 2: "Apr11 - 20:41:45" (16 chars)
+static const char *MONTH_ABBR[] = {
+    "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
+};
+
+static void format_clock(char *buf, size_t len) {
+    if (!sntp_is_synced()) {
+        strncpy(buf, "clock pending", len);
+        buf[len - 1] = '\0';
+        return;
+    }
+    time_t now;
+    time(&now);
+    struct tm ti;
+    localtime_r(&now, &ti);
+    snprintf(buf, len, "%s %2d  %02d:%02d:%02d",
+             MONTH_ABBR[ti.tm_mon], ti.tm_mday,
+             ti.tm_hour, ti.tm_min, ti.tm_sec);
+}
+
+// Easter egg: show "SCAN HAND" for 1 second every 392 seconds
+#define EASTER_EGG_INTERVAL_US (392 * 1000000LL)
+#define EASTER_EGG_DURATION_US (1 * 1000000LL)
+
+static void lcd_update_task(void *arg) {
+    char line0[17];
+    char line1[17];
+    int64_t easter_egg_start = esp_timer_get_time();
+
+    while (true) {
+        int64_t now = esp_timer_get_time();
+        int64_t elapsed = (now - easter_egg_start) % EASTER_EGG_INTERVAL_US;
+        bool easter_egg = elapsed < EASTER_EGG_DURATION_US;
+
+        if (lcd_override_active()) {
+            if (!s_lcd_raw_override) {
+                lcd_set_line(0, s_lcd_override[0]);
+                if (s_lcd_override[1][0] != '\0') {
+                    lcd_set_line(1, s_lcd_override[1]);
+                } else {
+                    format_clock(line1, sizeof(line1));
+                    lcd_set_line(1, line1);
+                }
+            }
+            // raw override: don't touch LCD (custom glyphs displayed directly)
+        } else {
+            const char *status = get_status_line();
+            if (status) {
+                strncpy(line0, status, sizeof(line0));
+                line0[sizeof(line0) - 1] = '\0';
+            } else if (easter_egg) {
+                strncpy(line0, "SCAN HAND", sizeof(line0));
+            } else {
+                strncpy(line0, "SCAN CARD", sizeof(line0));
+            }
+            format_clock(line1, sizeof(line1));
+
+            lcd_set_line(0, line0);
+            lcd_set_line(1, line1);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
 }
 
 extern "C" void app_main(void) {
@@ -94,11 +277,21 @@ extern "C" void app_main(void) {
     status_led_init();
     status_led_set(20, 20, 20);
 
+    // Initialize LCD display (auto-detects I2C address and pin order)
+    lcd_init();
+    lcd_status("Starting up...", "");
+
     // Initialize printer state
     printer_init(&s_printer);
 
     // Create print queue
     s_print_queue = xQueueCreate(4, sizeof(print_msg_t));
+
+    // Initialize card lookup DB
+    card_lookup_init();
+
+    // Initialize buzzer
+    buzzer_init();
 
     // Initialize WiFi + SNTP
     wifi_init();
@@ -110,8 +303,13 @@ extern "C" void app_main(void) {
     usb_host_set_printer_callback(on_printer_event);
     usb_host_init();
 
-    // Initialize button
-    QueueHandle_t button_queue = button_init();
+    // Initialize button GPIO (simple input, no ISR — we poll for long-press)
+    gpio_config_t btn_conf = {};
+    btn_conf.intr_type = GPIO_INTR_DISABLE;
+    btn_conf.mode = GPIO_MODE_INPUT;
+    btn_conf.pin_bit_mask = (1ULL << BUTTON_GPIO);
+    btn_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    gpio_config(&btn_conf);
 
     // Initialize RFID reader
     QueueHandle_t rfid_queue = rfid_init();
@@ -119,30 +317,65 @@ extern "C" void app_main(void) {
     // Start print task
     xTaskCreate(print_task, "print_task", 16384, nullptr, 1, nullptr);
 
-    // Drain any spurious button presses from boot
-    uint8_t dummy;
-    while (xQueueReceive(button_queue, &dummy, pdMS_TO_TICKS(100)) == pdTRUE) {}
+    // Start LCD update task (refreshes clock + status every 500ms)
+    xTaskCreate(lcd_update_task, "lcd_update", 2048, nullptr, 1, nullptr);
 
     // LED: green when ready
     status_led_set(0, 20, 0);
 
-    ESP_LOGI(TAG, "System ready — scan RFID card or press button to print");
+    ESP_LOGI(TAG, "System ready — scan RFID card or press button (1s hold) to test print");
 
-    // Main loop: handle both button presses and RFID scans
-    uint8_t btn;
+    // Main loop: handle RFID scans and button long-press
     uint32_t card_id;
+    int64_t btn_press_start = 0;
+    bool btn_triggered = false;
+
     while (true) {
         // Check RFID queue (non-blocking)
         if (xQueueReceive(rfid_queue, &card_id, 0) == pdTRUE) {
             ESP_LOGI(TAG, "RFID card scanned: 0x%08lX", (unsigned long)card_id);
-            enqueue_print(card_id);
+            lookup_result_t result = card_lookup(card_id);
+            if (card_id == NYANCAT_CARD_ID) {
+                buzzer_beep_good();
+                s_lcd_raw_override = true;
+                s_lcd_override_until = esp_timer_get_time() + 10000000LL;
+                lcd_show_nyancat_walk();  // blocking ~3s animation
+                s_lcd_raw_override = false;
+                if (result.found && s_printer.connected)
+                    enqueue_print(card_id, result.name);
+            } else if (result.found) {
+                if (s_printer.connected) {
+                    buzzer_beep_good();
+                    lcd_override(0, result.name, 3000);
+                    enqueue_print(card_id, result.name);
+                } else {
+                    buzzer_beep_sad();
+                    lcd_override(0, result.name, 3000);
+                    lcd_override(1, "NO PRINTER!", 3000);
+                    ESP_LOGW(TAG, "Card '%s' OK but no printer", result.name);
+                }
+            } else {
+                buzzer_beep_bad();
+                ESP_LOGW(TAG, "Unknown card 0x%08lX", (unsigned long)card_id);
+                lcd_override(0, "ERR:UNKNOWN CARD", 3000);
+            }
         }
 
-        // Check button queue (non-blocking)
-        if (xQueueReceive(button_queue, &btn, 0) == pdTRUE) {
-            ESP_LOGI(TAG, "Button pressed!");
-            // Button uses card_id 0 (test print)
-            enqueue_print(0);
+        // Button long-press detection (1 second hold)
+        bool btn_down = gpio_get_level(BUTTON_GPIO) == 0;
+        if (btn_down) {
+            if (btn_press_start == 0) {
+                btn_press_start = esp_timer_get_time();
+            } else if (!btn_triggered &&
+                       (esp_timer_get_time() - btn_press_start) >= 1000000LL) {
+                btn_triggered = true;
+                ESP_LOGI(TAG, "Button held 1s — test print");
+                lcd_override(0, "Test print...", 3000);
+                enqueue_print(0, "TEST");
+            }
+        } else {
+            btn_press_start = 0;
+            btn_triggered = false;
         }
 
         // Small delay to avoid busy-spinning

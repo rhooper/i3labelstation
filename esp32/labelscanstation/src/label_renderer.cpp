@@ -25,8 +25,8 @@ static bool s_font_ready = false;
 // Font pixel heights (user spec: 15mm name, 8mm date on 29mm wide label)
 // User reported 2x too large, so halve: ~7.5mm name, ~4mm date
 // 306px / 29mm = 10.55 px/mm
-#define NAME_PX_HEIGHT  111  // ~10.5mm (was 79, 1.4x bigger)
-#define DATE_PX_HEIGHT  50   // ~4.7mm (was 42, 1.2x bigger)
+#define NAME_PX_HEIGHT  111  // ~10.5mm
+#define DATE_PX_HEIGHT  63   // ~6mm
 
 // Set a pixel in the 1-bit framebuffer
 static inline void set_pixel(int x, int y) {
@@ -131,18 +131,21 @@ static void render_string_rot_centered(const char *str, float scale, int fb_x,
 }
 
 // Draw the i3 logo bitmap at position (dst_x, dst_y) in the framebuffer, rotated 90° CCW.
-// Source (x,y) maps to dest (dst_x + (H-1-y), dst_y + x) so the logo reads lengthwise like text.
-// The output occupies WIDTH pixels in y and HEIGHT pixels in x.
-static void draw_logo(int dst_x, int dst_y) {
+// scale: integer scale factor (1=original, 2=double, etc.)
+// After rotation: logo occupies HEIGHT*scale px in x, WIDTH*scale px in y.
+static void draw_logo(int dst_x, int dst_y, int scale = 1) {
     for (int y = 0; y < I3LOGO_HEIGHT; y++) {
         for (int x = 0; x < I3LOGO_WIDTH; x++) {
             int src_byte = y * I3LOGO_STRIDE + x / 8;
             uint8_t src_bit = 0x80 >> (x % 8);
             if (i3logo_data[src_byte] & src_bit) {
-                // 90° CCW: src(x,y) → dst(H-1-y, x)
-                int fx = dst_x + (I3LOGO_HEIGHT - 1 - y);
-                int fy = dst_y + x;
-                set_pixel(fx, fy);
+                for (int sy = 0; sy < scale; sy++) {
+                    for (int sx = 0; sx < scale; sx++) {
+                        int fx = dst_x + (I3LOGO_HEIGHT * scale - 1 - (y * scale + sy));
+                        int fy = dst_y + (x * scale + sx);
+                        set_pixel(fx, fy);
+                    }
+                }
             }
         }
     }
@@ -170,34 +173,31 @@ const uint8_t *label_renderer_render(const char *card_id) {
     float name_scale = stbtt_ScaleForPixelHeight(&s_font, NAME_PX_HEIGHT);
     float date_scale = stbtt_ScaleForPixelHeight(&s_font, DATE_PX_HEIGHT);
 
-    // Logo — rotated 90° CCW, centered across label width, near top (left when reading)
-    // After rotation: logo occupies I3LOGO_HEIGHT px in x, I3LOGO_WIDTH px in y
-    int logo_x = (LABEL_PRINTABLE_W - I3LOGO_HEIGHT) / 2;
+    // Logo — rotated 90° CCW, 2x scaled, centered across label width
+    // After rotation at 2x: occupies I3LOGO_HEIGHT*2 px in x, I3LOGO_WIDTH*2 px in y
+    int logo_scale = 2;
+    int logo_x = (LABEL_PRINTABLE_W - I3LOGO_HEIGHT * logo_scale) / 2;
     int logo_y = 20;
-    draw_logo(logo_x, logo_y);
+    draw_logo(logo_x, logo_y, logo_scale);
 
-    // Text starts after logo (left-aligned)
-    int text_y_start = logo_y + I3LOGO_WIDTH + 30;  // logo is WIDTH px tall in y after rotation
+    // Text starts after logo
+    int text_y_start = logo_y + I3LOGO_WIDTH * logo_scale + 30;
 
-    // Name — left-aligned, centered across label width with date
+    // Font metrics
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &line_gap);
 
+    // Name — near top of label (high fb_x)
     int name_ascent_px = (int)(ascent * name_scale + 0.5f);
-    int name_total_h = (int)((ascent - descent) * name_scale + 0.5f);
-    // Center two lines of text (name + date) in the label width
-    int gap = 10;  // gap between name and date
-    int date_total_h = (int)((ascent - descent) * date_scale + 0.5f);
-    int total_text_h = name_total_h + gap + date_total_h;
-    int top_margin = (LABEL_PRINTABLE_W - total_text_h) / 2;
-
-    // Name baseline: top_margin + name_ascent
-    int name_fb_x = LABEL_PRINTABLE_W - top_margin - (name_total_h - name_ascent_px);
+    int name_descent_px = (int)(-descent * name_scale + 0.5f);
+    int name_top_margin = 15;  // px from top edge
+    int name_fb_x = LABEL_PRINTABLE_W - name_top_margin - name_descent_px;
     render_string_rot(card_id, name_scale, name_fb_x, text_y_start);
 
-    // Date baseline: below name, left-aligned
+    // Date — bottom-aligned to label edge, left-justified
     int date_ascent_px = (int)(ascent * date_scale + 0.5f);
-    int date_fb_x = name_fb_x - name_ascent_px - gap - (date_total_h - date_ascent_px);
+    int date_bottom_margin = 5;  // px from bottom edge
+    int date_fb_x = date_ascent_px + date_bottom_margin;
 
     time_t now;
     time(&now);
