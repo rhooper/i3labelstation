@@ -3,11 +3,13 @@
 #include <cstdint>
 #include <cstddef>
 #include "usb/usb_host.h"
+#include "ql_models.h"
 
 // Printer connection state
 struct PrinterState {
     usb_device_handle_t dev_handle;
     usb_host_client_handle_t client_handle;
+    const ql_model_t *model;
     uint8_t interface_number;
     uint8_t bulk_out_addr;
     uint8_t bulk_in_addr;

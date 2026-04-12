@@ -3,14 +3,8 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 
-// Brother QL-500 USB identifiers
+// Brother QL USB vendor ID (shared across all models)
 #define BROTHER_QL_VID 0x04F9
-#define BROTHER_QL_PID 0x2015
-
-// Brother QL-500 model capabilities
-#define QL500_BYTES_PER_ROW 90
-#define QL500_COMPRESSION   false
-#define QL500_CUTTING       false
 
 // Label: 29x90mm die-cut
 #define LABEL_PRINTABLE_W   306

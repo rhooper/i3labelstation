@@ -1,5 +1,6 @@
 #include "usb_host_task.h"
 #include "app_config.h"
+#include "ql_models.h"
 
 #include <cstring>
 #include "freertos/FreeRTOS.h"
@@ -31,11 +32,15 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
             ESP_LOGI(TAG, "  Class: 0x%02X  SubClass: 0x%02X  Protocol: 0x%02X",
                      desc->bDeviceClass, desc->bDeviceSubClass, desc->bDeviceProtocol);
 
-            if (desc->idVendor == BROTHER_QL_VID && desc->idProduct == BROTHER_QL_PID) {
-                ESP_LOGI(TAG, "Brother QL-500 detected!");
+            const ql_model_t *model = nullptr;
+            if (desc->idVendor == BROTHER_QL_VID) {
+                model = ql_model_lookup(desc->idProduct);
+            }
+            if (model) {
+                ESP_LOGI(TAG, "Brother %s detected!", model->name);
                 if (s_printer_cb) {
                     s_printer_dev_handle = dev_handle;
-                    s_printer_cb(dev_handle, true);
+                    s_printer_cb(dev_handle, true, model);
                     return;  // don't close — printer_on_connected takes ownership
                 }
             } else if (desc->bDeviceClass == 0x09) {
@@ -56,7 +61,7 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
                  event_msg->dev_gone.dev_hdl, s_printer_dev_handle);
         if (s_printer_cb && event_msg->dev_gone.dev_hdl == s_printer_dev_handle) {
             s_printer_dev_handle = nullptr;
-            s_printer_cb(nullptr, false);
+            s_printer_cb(nullptr, false, nullptr);
         }
         break;
     default:

@@ -4,6 +4,7 @@ idf_component_register(
         "usb_host_task.cpp"
         "usb_printer.cpp"
         "brother_ql.cpp"
+        "ql_models.cpp"
         "wifi_manager.cpp"
         "label_renderer.cpp"
         "button.cpp"

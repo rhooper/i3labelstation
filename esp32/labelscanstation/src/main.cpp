@@ -124,16 +124,19 @@ static bool lcd_override_active() {
     return false;
 }
 
-static void on_printer_event(usb_device_handle_t dev_handle, bool connected) {
+static void on_printer_event(usb_device_handle_t dev_handle, bool connected, const ql_model_t *model) {
     if (connected) {
+        s_printer.model = model;
         if (printer_on_connected(&s_printer, dev_handle, usb_host_get_client_handle())) {
-            ESP_LOGI(TAG, "Printer ready");
+            ESP_LOGI(TAG, "Printer ready (%s)", model->name);
         } else {
             ESP_LOGE(TAG, "Printer connection setup failed");
+            s_printer.model = nullptr;
             usb_host_device_close(usb_host_get_client_handle(), dev_handle);
         }
     } else {
         printer_on_disconnected(&s_printer);
+        s_printer.model = nullptr;
     }
 }
 
@@ -161,7 +164,7 @@ static void print_task(void *arg) {
         }
 
         ESP_LOGI(TAG, "Sending to printer...");
-        bool ok = brother_ql_print(&s_printer, fb);
+        bool ok = brother_ql_print(&s_printer, s_printer.model, fb);
         ESP_LOGI(TAG, "Print %s", ok ? "succeeded" : "FAILED");
         if (!ok) {
             lcd_override(0, "PRINT FAILED!", 3000);

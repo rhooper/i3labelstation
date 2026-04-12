@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <cstddef>
-#include "usb_printer.h"
+
+struct PrinterState;
+struct ql_model_t;
 
 // Brother QL status response (32 bytes)
 struct BrotherQLStatus {
@@ -21,4 +23,5 @@ BrotherQLStatus brother_ql_parse_status(const uint8_t *data, size_t len);
 
 // Print a label: stream header + raster rows + print command, then read status.
 // framebuffer: 1-bit packed pixel data (MSB first), LABEL_FB_STRIDE * LABEL_PRINTABLE_H bytes.
-bool brother_ql_print(PrinterState *printer, const uint8_t *framebuffer);
+// model: printer model capabilities (invalidate count, mode setting, etc.)
+bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint8_t *framebuffer);

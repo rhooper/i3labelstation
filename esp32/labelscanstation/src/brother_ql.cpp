@@ -1,4 +1,6 @@
 #include "brother_ql.h"
+#include "usb_printer.h"
+#include "ql_models.h"
 #include "app_config.h"
 
 #include <cstring>
@@ -7,15 +9,16 @@
 
 static const char *TAG = "brother_ql";
 
-// Small buffer for building header/footer commands (reused per call)
-static uint8_t s_cmd_buf[256];
+// Buffer for building header commands (reused per call).
+// Must be large enough for max invalidate (400) + protocol commands.
+static uint8_t s_cmd_buf[512];
 
-static size_t build_header(uint8_t *buf) {
+static size_t build_header(uint8_t *buf, const ql_model_t *model) {
     size_t pos = 0;
 
-    // Invalidate: 200 null bytes
-    memset(buf + pos, 0x00, 200);
-    pos += 200;
+    // Invalidate: null bytes (200 for older models, 400 for QL-800+)
+    memset(buf + pos, 0x00, model->num_invalidate);
+    pos += model->num_invalidate;
 
     // Initialize: ESC @
     buf[pos++] = 0x1B;
@@ -25,6 +28,22 @@ static size_t build_header(uint8_t *buf) {
     buf[pos++] = 0x1B;
     buf[pos++] = 0x69;
     buf[pos++] = 0x53;
+
+    // Mode setting: ESC i M (models that support it)
+    if (model->mode_setting) {
+        buf[pos++] = 0x1B;
+        buf[pos++] = 0x69;
+        buf[pos++] = 0x4D;
+        buf[pos++] = 0x00;  // no auto-cut
+    }
+
+    // Expanded mode: ESC i K (models that support it)
+    if (model->expanded_mode) {
+        buf[pos++] = 0x1B;
+        buf[pos++] = 0x69;
+        buf[pos++] = 0x4B;
+        buf[pos++] = 0x00;  // no cut-every-N, no mirror
+    }
 
     // Media/quality: ESC i z + 10 bytes
     buf[pos++] = 0x1B;
@@ -47,6 +66,14 @@ static size_t build_header(uint8_t *buf) {
     buf[pos++] = 0x00;  // page
     buf[pos++] = 0x00;  // padding
 
+    // Auto-cut: ESC i A (models with cutting capability)
+    if (model->cutting) {
+        buf[pos++] = 0x1B;
+        buf[pos++] = 0x69;
+        buf[pos++] = 0x41;
+        buf[pos++] = 0x01;  // cut every 1 label
+    }
+
     // Margins: ESC i d + 2 bytes
     buf[pos++] = 0x1B;
     buf[pos++] = 0x69;
@@ -57,12 +84,12 @@ static size_t build_header(uint8_t *buf) {
     return pos;
 }
 
-// Build one raster row command into buf. Returns length (3 + BYTES_PER_ROW).
-static size_t build_raster_row(uint8_t *buf, const uint8_t *framebuffer, uint16_t y) {
-    uint8_t raster_row[QL500_BYTES_PER_ROW];
-    memset(raster_row, 0, QL500_BYTES_PER_ROW);
+// Build one raster row command into buf. Returns length (3 + bytes_per_row).
+static size_t build_raster_row(uint8_t *buf, const uint8_t *framebuffer, uint16_t y, uint8_t bytes_per_row) {
+    uint8_t raster_row[bytes_per_row];
+    memset(raster_row, 0, bytes_per_row);
 
-    uint16_t raster_width_px = QL500_BYTES_PER_ROW * 8;
+    uint16_t raster_width_px = bytes_per_row * 8;
     uint16_t left_offset_px = raster_width_px - LABEL_PRINTABLE_W - LABEL_RIGHT_MARGIN;
 
     // Copy framebuffer pixels into raster row at correct offset
@@ -78,18 +105,18 @@ static size_t build_raster_row(uint8_t *buf, const uint8_t *framebuffer, uint16_
     // Header
     buf[0] = 0x67;
     buf[1] = 0x00;
-    buf[2] = QL500_BYTES_PER_ROW;
+    buf[2] = bytes_per_row;
 
     // Flip horizontally + reverse bits (Brother QL hardware requirement)
-    for (uint8_t i = 0; i < QL500_BYTES_PER_ROW; i++) {
-        uint8_t b = raster_row[QL500_BYTES_PER_ROW - 1 - i];
+    for (uint8_t i = 0; i < bytes_per_row; i++) {
+        uint8_t b = raster_row[bytes_per_row - 1 - i];
         b = ((b & 0xF0) >> 4) | ((b & 0x0F) << 4);
         b = ((b & 0xCC) >> 2) | ((b & 0x33) << 2);
         b = ((b & 0xAA) >> 1) | ((b & 0x55) << 1);
         buf[3 + i] = b;
     }
 
-    return 3 + QL500_BYTES_PER_ROW;
+    return 3 + bytes_per_row;
 }
 
 BrotherQLStatus brother_ql_parse_status(const uint8_t *data, size_t len) {
@@ -112,11 +139,11 @@ BrotherQLStatus brother_ql_parse_status(const uint8_t *data, size_t len) {
     return status;
 }
 
-bool brother_ql_print(PrinterState *printer, const uint8_t *framebuffer) {
-    ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
+bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint8_t *framebuffer) {
+    ESP_LOGI(TAG, "Printing on %s (heap: %lu bytes)", model->name, (unsigned long)esp_get_free_heap_size());
 
     // Send header (invalidate + init + status + media + margins)
-    size_t hdr_len = build_header(s_cmd_buf);
+    size_t hdr_len = build_header(s_cmd_buf, model);
     ESP_LOGI(TAG, "Sending header (%zu bytes)...", hdr_len);
     esp_err_t err = printer_send(printer, s_cmd_buf, hdr_len);
     if (err != ESP_OK) {
@@ -124,11 +151,13 @@ bool brother_ql_print(PrinterState *printer, const uint8_t *framebuffer) {
         return false;
     }
 
+    uint8_t bytes_per_row = model->bytes_per_row;
+
     // Send raster data row by row
-    uint8_t row_buf[3 + QL500_BYTES_PER_ROW];  // 93 bytes
+    uint8_t row_buf[3 + bytes_per_row];
     ESP_LOGI(TAG, "Sending %d raster rows...", LABEL_PRINTABLE_H);
     for (uint16_t y = 0; y < LABEL_PRINTABLE_H; y++) {
-        size_t row_len = build_raster_row(row_buf, framebuffer, y);
+        size_t row_len = build_raster_row(row_buf, framebuffer, y, bytes_per_row);
         err = printer_send(printer, row_buf, row_len);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Raster row %d send failed: %s", y, esp_err_to_name(err));
@@ -139,7 +168,7 @@ bool brother_ql_print(PrinterState *printer, const uint8_t *framebuffer) {
         }
     }
 
-    // Send print command
+    // Send print command (0x1A = print without cut)
     uint8_t print_cmd = 0x1A;
     err = printer_send(printer, &print_cmd, 1);
     if (err != ESP_OK) {
