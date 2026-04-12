@@ -12,8 +12,11 @@ static const char *TAG = "usb_host";
 
 static usb_phy_handle_t s_phy_handle = nullptr;
 static usb_host_client_handle_t s_client_handle = nullptr;
+#define MAX_PRINTERS 3
+
 static usb_printer_event_cb_t s_printer_cb = nullptr;
-static usb_device_handle_t s_printer_dev_handle = nullptr;
+static usb_device_handle_t s_printer_dev_handles[MAX_PRINTERS] = {};
+static int s_num_printers = 0;
 
 static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg) {
     switch (event_msg->event) {
@@ -38,8 +41,9 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
             }
             if (model) {
                 ESP_LOGI(TAG, "Brother %s detected!", model->name);
-                if (s_printer_cb) {
-                    s_printer_dev_handle = dev_handle;
+                if (s_printer_cb && s_num_printers < MAX_PRINTERS) {
+                    s_printer_dev_handles[s_num_printers] = dev_handle;
+                    s_num_printers++;
                     s_printer_cb(dev_handle, true, model);
                     return;  // don't close — printer_on_connected takes ownership
                 }
@@ -56,14 +60,26 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
         usb_host_device_close(s_client_handle, dev_handle);
         break;
     }
-    case USB_HOST_CLIENT_EVENT_DEV_GONE:
-        ESP_LOGW(TAG, "USB device disconnected (handle=%p, printer=%p)",
-                 event_msg->dev_gone.dev_hdl, s_printer_dev_handle);
-        if (s_printer_cb && event_msg->dev_gone.dev_hdl == s_printer_dev_handle) {
-            s_printer_dev_handle = nullptr;
-            s_printer_cb(nullptr, false, nullptr);
+    case USB_HOST_CLIENT_EVENT_DEV_GONE: {
+        usb_device_handle_t gone_handle = event_msg->dev_gone.dev_hdl;
+        ESP_LOGW(TAG, "USB device disconnected (handle=%p)", gone_handle);
+        // Find and remove from our tracked printers
+        for (int i = 0; i < s_num_printers; i++) {
+            if (s_printer_dev_handles[i] == gone_handle) {
+                // Shift remaining handles down
+                for (int j = i; j < s_num_printers - 1; j++) {
+                    s_printer_dev_handles[j] = s_printer_dev_handles[j + 1];
+                }
+                s_num_printers--;
+                s_printer_dev_handles[s_num_printers] = nullptr;
+                if (s_printer_cb) {
+                    s_printer_cb(gone_handle, false, nullptr);
+                }
+                break;
+            }
         }
         break;
+    }
     default:
         ESP_LOGW(TAG, "Unknown USB event: %d", event_msg->event);
         break;

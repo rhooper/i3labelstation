@@ -11,6 +11,7 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 - Card lookup from compiled-in database (`cards.tsv` → `card_db.h`)
 - Brother QL USB printing with multi-model support (hotplug detection)
 - Supported models: QL-500, QL-550, QL-560, QL-570, QL-580N, QL-650TD, QL-700, QL-710W, QL-720NW, QL-800, QL-810W, QL-820NWB
+- Up to 3 printers via USB hub, selected by mode switch (GPIO36/37)
 - 16x2 HD44780 LCD status display with clock (America/Detroit timezone, auto DST)
 - Buzzer feedback: good beep (C7), bad buzz (C4→A♭4), sad beep (C5→G4→E4 when no printer)
 - WiFi + SNTP with nightly resync at random time (midnight–5AM)
@@ -35,6 +36,8 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 | 9 | I2C SCL (LCD) — auto-tries swapped |
 | 18 | RFID UART RX |
 | 19/20 | USB OTG Host |
+| 36 | Mode switch pin 2 (ground = mode 3) |
+| 37 | Mode switch pin 1 (ground = mode 1) |
 | 38 | Buzzer (passive piezo, PWM) |
 | 43/44 | UART0 (serial logs) |
 | 48 | WS2812 RGB LED |
@@ -90,6 +93,7 @@ while True:
 | `rfid_reader.*` | 125kHz RFID reader via UART |
 | `button.*` | Boot button driver (ISR-based, unused — polling in main) |
 | `status_led.*` | WS2812 RGB status LED |
+| `mode_switch.*` | 3-state mode switch on GPIO36/37 |
 
 ### LCD Display (16×2)
 - Ready: `SCAN CARD` / `Apr 11  20:41:45`

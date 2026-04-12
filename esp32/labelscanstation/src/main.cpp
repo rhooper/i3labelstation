@@ -10,6 +10,7 @@
 #include "lcd_display.h"
 #include "card_lookup.h"
 #include "buzzer.h"
+#include "mode_switch.h"
 
 #include <cstring>
 #include <cstdio>
@@ -94,7 +95,10 @@ static void lcd_show_nyancat_walk() {
 
 static const char *TAG = "main";
 
-static PrinterState s_printer;
+#define MAX_PRINTERS 3
+static PrinterState s_printers[MAX_PRINTERS];
+static int s_num_printers = 0;
+static uint8_t s_active_mode = 0;  // last known mode switch value
 
 // Print queue carries the looked-up name
 typedef struct {
@@ -124,19 +128,49 @@ static bool lcd_override_active() {
     return false;
 }
 
+// Get the active printer based on mode switch (mode 1/2/3 → index 0/1/2)
+static PrinterState *get_active_printer() {
+    uint8_t idx = s_active_mode - 1;  // mode is 1-based
+    if (idx < MAX_PRINTERS && s_printers[idx].connected)
+        return &s_printers[idx];
+    return nullptr;
+}
+
 static void on_printer_event(usb_device_handle_t dev_handle, bool connected, const ql_model_t *model) {
     if (connected) {
-        s_printer.model = model;
-        if (printer_on_connected(&s_printer, dev_handle, usb_host_get_client_handle())) {
-            ESP_LOGI(TAG, "Printer ready (%s)", model->name);
+        if (s_num_printers >= MAX_PRINTERS) {
+            ESP_LOGW(TAG, "Max printers reached, ignoring %s", model->name);
+            usb_host_device_close(usb_host_get_client_handle(), dev_handle);
+            return;
+        }
+        int slot = s_num_printers;
+        s_printers[slot].model = model;
+        if (printer_on_connected(&s_printers[slot], dev_handle, usb_host_get_client_handle())) {
+            s_num_printers++;
+            ESP_LOGI(TAG, "Printer %d ready (%s)", slot + 1, model->name);
         } else {
             ESP_LOGE(TAG, "Printer connection setup failed");
-            s_printer.model = nullptr;
+            s_printers[slot].model = nullptr;
             usb_host_device_close(usb_host_get_client_handle(), dev_handle);
         }
     } else {
-        printer_on_disconnected(&s_printer);
-        s_printer.model = nullptr;
+        // Find the printer that disconnected by matching dev_handle
+        for (int i = 0; i < s_num_printers; i++) {
+            if (s_printers[i].dev_handle == dev_handle) {
+                ESP_LOGW(TAG, "Printer %d disconnected (%s)", i + 1,
+                         s_printers[i].model ? s_printers[i].model->name : "unknown");
+                printer_on_disconnected(&s_printers[i]);
+                s_printers[i].model = nullptr;
+                // Shift remaining printers down to keep array packed
+                for (int j = i; j < s_num_printers - 1; j++) {
+                    s_printers[j] = s_printers[j + 1];
+                }
+                s_num_printers--;
+                // Clear the now-unused last slot
+                printer_init(&s_printers[s_num_printers]);
+                break;
+            }
+        }
     }
 }
 
@@ -148,12 +182,15 @@ static void print_task(void *arg) {
         if (xQueueReceive(s_print_queue, &msg, portMAX_DELAY) != pdTRUE)
             continue;
 
-        if (!s_printer.connected) {
-            ESP_LOGW(TAG, "Print requested but printer not connected");
+        PrinterState *printer = get_active_printer();
+        if (!printer) {
+            ESP_LOGW(TAG, "Print requested but no printer for mode %d", s_active_mode);
+            lcd_override(0, "NO PRINTER!", 3000);
             continue;
         }
 
-        ESP_LOGI(TAG, "Print requested — rendering label for '%s'...", msg.name);
+        ESP_LOGI(TAG, "Print requested on %s — rendering label for '%s'...",
+                 printer->model->name, msg.name);
         lcd_override(0, "PRINTING...", 5000);
         lcd_override(1, msg.name, 5000);
         const uint8_t *fb = label_renderer_render(msg.name);
@@ -164,12 +201,11 @@ static void print_task(void *arg) {
         }
 
         ESP_LOGI(TAG, "Sending to printer...");
-        bool ok = brother_ql_print(&s_printer, s_printer.model, fb);
+        bool ok = brother_ql_print(printer, printer->model, fb);
         ESP_LOGI(TAG, "Print %s", ok ? "succeeded" : "FAILED");
         if (!ok) {
             lcd_override(0, "PRINT FAILED!", 3000);
         }
-        // On success, override expires and normal status resumes
     }
 }
 
@@ -203,7 +239,7 @@ static const char *get_status_line() {
     if (first_boot || first_ntp)    return "NETWORKING...";
     if (!wifi_is_connected())       return "ERR: NO WIFI";
     if (!sntp_is_synced())          return "ERR: NO NTP";
-    if (!s_printer.connected)       return "ERR: NO PRINTER";
+    if (!get_active_printer())       return "ERR: NO PRINTER";
     // Future: OUT OF PAPER, PRINTER ERROR from status polling
     return nullptr;
 }
@@ -284,8 +320,13 @@ extern "C" void app_main(void) {
     lcd_init();
     lcd_status("Starting up...", "");
 
-    // Initialize printer state
-    printer_init(&s_printer);
+    // Initialize printer states
+    for (int i = 0; i < MAX_PRINTERS; i++)
+        printer_init(&s_printers[i]);
+
+    // Initialize mode switch
+    mode_switch_init();
+    s_active_mode = mode_switch_read();
 
     // Create print queue
     s_print_queue = xQueueCreate(4, sizeof(print_msg_t));
@@ -344,10 +385,10 @@ extern "C" void app_main(void) {
                 s_lcd_override_until = esp_timer_get_time() + 10000000LL;
                 lcd_show_nyancat_walk();  // blocking ~3s animation
                 s_lcd_raw_override = false;
-                if (result.found && s_printer.connected)
+                if (result.found && get_active_printer())
                     enqueue_print(card_id, result.name);
             } else if (result.found) {
-                if (s_printer.connected) {
+                if (get_active_printer()) {
                     buzzer_beep_good();
                     lcd_override(0, result.name, 3000);
                     enqueue_print(card_id, result.name);
@@ -379,6 +420,23 @@ extern "C" void app_main(void) {
         } else {
             btn_press_start = 0;
             btn_triggered = false;
+        }
+
+        // Poll mode switch for changes
+        uint8_t mode = mode_switch_read();
+        if (mode != s_active_mode) {
+            s_active_mode = mode;
+            ESP_LOGI(TAG, "Mode switch → %d", mode);
+            PrinterState *p = get_active_printer();
+            if (p && p->model) {
+                char buf[17];
+                snprintf(buf, sizeof(buf), "%d: %s", mode, p->model->name);
+                lcd_override(0, buf, 2000);
+            } else {
+                char buf[17];
+                snprintf(buf, sizeof(buf), "MODE %d (empty)", mode);
+                lcd_override(0, buf, 2000);
+            }
         }
 
         // Small delay to avoid busy-spinning
