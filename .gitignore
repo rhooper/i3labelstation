@@ -21,6 +21,15 @@ esp32/labelscanstation/src/secrets.h
 .idea/
 .vscode/
 
+# Member data
+cards.tsv
+codes.csv
+members-offset-*.json
+apicreds.yaml
+
+# Generated build artifacts
+esp32/labelscanstation/src/card_db.h
+
 # Credentials
 wifi.yaml
 
