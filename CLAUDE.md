@@ -15,7 +15,6 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 - 16x2 HD44780 LCD status display with clock (America/Detroit timezone, auto DST)
 - Buzzer feedback: good beep (C7), bad buzz (C4→A♭4), sad beep (C5→G4→E4 when no printer)
 - WiFi + SNTP with nightly resync at random time (midnight–5AM)
-- Nyancat easter egg on card 805446808
 
 ### What's Left
 1. **Boot-time printer detection**: Printer connected before boot isn't detected (hotplug works)
@@ -99,7 +98,7 @@ while True:
 - Ready: `SCAN CARD` / `Apr 11  20:41:45`
 - Errors (precedence): `NETWORKING...` → `ERR: NO WIFI` → `ERR: NO NTP` → `ERR: NO PRINTER`
 - Card scan: shows name (3s) or `ERR:UNKNOWN CARD`
-- Easter eggs: "SCAN HAND" (1s every 392s), nyancat walk animation
+- Easter egg: "SCAN HAND" (1s every 392s)
 
 ### Label Layout (29×90mm die-cut, rotated 90° CCW)
 - i3 logo (2× scaled) at top

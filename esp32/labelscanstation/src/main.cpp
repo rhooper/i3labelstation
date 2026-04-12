@@ -15,77 +15,6 @@
 #include <cstring>
 #include <cstdio>
 
-// Nyancat easter egg card
-#define NYANCAT_CARD_ID 805446808
-
-// Nyancat custom LCD glyphs — 6 chars for the cat sprite (2 rows × 3 cols)
-// Top row: tail, body/poptart, head+ears
-// Bot row: tail, legs, head
-// Plus 2 rainbow chars
-static const uint8_t nyan_top_tail[8]  = {0x00, 0x01, 0x03, 0x07, 0x07, 0x07, 0x03, 0x01};
-static const uint8_t nyan_top_body[8]  = {0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F};
-static const uint8_t nyan_top_head[8]  = {0x11, 0x1B, 0x1F, 0x15, 0x1F, 0x0E, 0x1F, 0x1F};
-static const uint8_t nyan_bot_tail[8]  = {0x01, 0x03, 0x07, 0x03, 0x01, 0x00, 0x00, 0x00};
-static const uint8_t nyan_bot_body1[8] = {0x1F, 0x1F, 0x00, 0x0A, 0x0A, 0x00, 0x00, 0x00};
-static const uint8_t nyan_bot_body2[8] = {0x1F, 0x1F, 0x00, 0x14, 0x14, 0x00, 0x00, 0x00};
-static const uint8_t nyan_bot_head[8]  = {0x1F, 0x1E, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00};
-static const uint8_t nyan_rainbow[8]   = {0x00, 0x1F, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00};
-
-// Nyancat walks across 16-col LCD. Cat is 4 chars wide (tail, body, body, head).
-// Rainbow trail fills behind it. Animation runs as a blocking loop.
-static void lcd_show_nyancat_walk() {
-    // Load custom chars: 0=tail-top, 1=body-top, 2=head-top,
-    // 3=tail-bot, 4=legs(frame), 5=head-bot, 6=rainbow
-    lcd_create_char(0, nyan_top_tail);
-    lcd_create_char(1, nyan_top_body);
-    lcd_create_char(2, nyan_top_head);
-    lcd_create_char(3, nyan_bot_tail);
-    // start with legs frame 1
-    lcd_create_char(4, nyan_bot_body1);
-    lcd_create_char(5, nyan_bot_head);
-    lcd_create_char(6, nyan_rainbow);
-
-    // Cat sprite: 6 chars wide
-    // top: \x00 \x01 \x01 \x01 \x01 \x02
-    // bot: \x03 \x04 \x01 \x01 \x04 \x05
-    #define NYAN_WIDTH 6
-
-    char line0[17];
-    char line1[17];
-
-    // Walk from off-left to off-right
-    for (int pos = -NYAN_WIDTH; pos <= 16; pos++) {
-        // Alternate legs each frame
-        if (pos % 2 == 0)
-            lcd_create_char(4, nyan_bot_body1);
-        else
-            lcd_create_char(4, nyan_bot_body2);
-
-        // Build lines
-        for (int i = 0; i < 16; i++) {
-            int ci = i - pos;  // char index within sprite
-            if (ci >= 0 && ci < NYAN_WIDTH) {
-                static const char top_chars[] = {'\x00', '\x01', '\x01', '\x01', '\x01', '\x02'};
-                static const char bot_chars[] = {'\x03', '\x04', '\x01', '\x01', '\x04', '\x05'};
-                line0[i] = top_chars[ci];
-                line1[i] = bot_chars[ci];
-            } else if (i < pos) {
-                // Rainbow trail behind cat
-                line0[i] = '\x06';
-                line1[i] = '\x06';
-            } else {
-                line0[i] = ' ';
-                line1[i] = ' ';
-            }
-        }
-        line0[16] = '\0';
-        line1[16] = '\0';
-
-        lcd_set_line(0, line0);
-        lcd_set_line(1, line1);
-        vTaskDelay(pdMS_TO_TICKS(150));
-    }
-}
 #include <ctime>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -110,7 +39,6 @@ static QueueHandle_t s_print_queue = nullptr;
 // Transient LCD override (e.g. "Printing...", card scan feedback)
 static char s_lcd_override[2][17] = {};  // [line][text], 16 chars + NUL
 static int64_t s_lcd_override_until = 0; // microsecond timestamp
-static bool s_lcd_raw_override = false;  // true = don't touch LCD during override (custom glyphs)
 
 static void lcd_override(int line, const char *text, int duration_ms) {
     strncpy(s_lcd_override[line], text, 16);
@@ -122,10 +50,7 @@ static void lcd_override(int line, const char *text, int duration_ms) {
 }
 
 static bool lcd_override_active() {
-    if (esp_timer_get_time() < s_lcd_override_until)
-        return true;
-    s_lcd_raw_override = false;
-    return false;
+    return esp_timer_get_time() < s_lcd_override_until;
 }
 
 // Get the active printer based on mode switch (mode 1/2/3 → index 0/1/2)
@@ -201,10 +126,13 @@ static void print_task(void *arg) {
         }
 
         ESP_LOGI(TAG, "Sending to printer...");
-        bool ok = brother_ql_print(printer, printer->model, fb);
+        char print_err[17] = {};
+        bool ok = brother_ql_print(printer, printer->model, fb, print_err, sizeof(print_err));
         ESP_LOGI(TAG, "Print %s", ok ? "succeeded" : "FAILED");
         if (!ok) {
-            lcd_override(0, "PRINT FAILED!", 3000);
+            lcd_override(0, "PRINT FAILED!", 10000);
+            if (print_err[0])
+                lcd_override(1, print_err, 10000);
         }
     }
 }
@@ -279,16 +207,13 @@ static void lcd_update_task(void *arg) {
         bool easter_egg = elapsed < EASTER_EGG_DURATION_US;
 
         if (lcd_override_active()) {
-            if (!s_lcd_raw_override) {
-                lcd_set_line(0, s_lcd_override[0]);
-                if (s_lcd_override[1][0] != '\0') {
-                    lcd_set_line(1, s_lcd_override[1]);
-                } else {
-                    format_clock(line1, sizeof(line1));
-                    lcd_set_line(1, line1);
-                }
+            lcd_set_line(0, s_lcd_override[0]);
+            if (s_lcd_override[1][0] != '\0') {
+                lcd_set_line(1, s_lcd_override[1]);
+            } else {
+                format_clock(line1, sizeof(line1));
+                lcd_set_line(1, line1);
             }
-            // raw override: don't touch LCD (custom glyphs displayed directly)
         } else {
             const char *status = get_status_line();
             if (status) {
@@ -379,15 +304,7 @@ extern "C" void app_main(void) {
         if (xQueueReceive(rfid_queue, &card_id, 0) == pdTRUE) {
             ESP_LOGI(TAG, "RFID card scanned: 0x%08lX", (unsigned long)card_id);
             lookup_result_t result = card_lookup(card_id);
-            if (card_id == NYANCAT_CARD_ID) {
-                buzzer_beep_good();
-                s_lcd_raw_override = true;
-                s_lcd_override_until = esp_timer_get_time() + 10000000LL;
-                lcd_show_nyancat_walk();  // blocking ~3s animation
-                s_lcd_raw_override = false;
-                if (result.found && get_active_printer())
-                    enqueue_print(card_id, result.name);
-            } else if (result.found) {
+            if (result.found) {
                 if (get_active_printer()) {
                     buzzer_beep_good();
                     lcd_override(0, result.name, 3000);
