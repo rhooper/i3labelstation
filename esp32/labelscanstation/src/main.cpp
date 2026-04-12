@@ -9,8 +9,6 @@
 #include "lcd_display.h"
 #include "card_lookup.h"
 #include "buzzer.h"
-#include "mode_switch.h"
-#include "led_output.h"
 
 #include <cstring>
 #include <cstdio>
@@ -26,16 +24,13 @@
 static const char *TAG = "main";
 
 static PrinterState s_printers[MAX_PRINTERS];
-static uint8_t s_active_mode = 0;  // last known mode switch value
 
 // Mutex protecting s_printers[] — held during connect/disconnect and printing
 static SemaphoreHandle_t s_printer_mutex = nullptr;
 
-// Print queue carries label info
+// Print queue carries name to print
 typedef struct {
     char name[LOOKUP_NAME_MAX];
-    uint8_t label_type;  // label_type_t
-    uint8_t days;        // for parking permits
 } print_msg_t;
 
 static QueueHandle_t s_print_queue = nullptr;
@@ -60,13 +55,17 @@ static bool lcd_override_active() {
     return esp_timer_get_time() < s_lcd_override_until;
 }
 
-// Get the first connected printer. Caller must hold s_printer_mutex.
+// Get the best printer: prefer highest USB PID (highest model number) among connected printers.
+// Caller must hold s_printer_mutex.
 static PrinterState *get_active_printer() {
+    PrinterState *best = nullptr;
     for (int i = 0; i < MAX_PRINTERS; i++) {
-        if (s_printers[i].connected)
-            return &s_printers[i];
+        if (s_printers[i].connected && s_printers[i].model) {
+            if (!best || s_printers[i].model->usb_pid > best->model->usb_pid)
+                best = &s_printers[i];
+        }
     }
-    return nullptr;
+    return best;
 }
 
 // Check if any printer is connected (lock-free for status display)
@@ -134,29 +133,16 @@ static void print_task(void *arg) {
         PrinterState *printer = get_active_printer();
         if (!printer) {
             xSemaphoreGive(s_printer_mutex);
-            ESP_LOGW(TAG, "Print requested but no printer for mode %d", s_active_mode);
+            ESP_LOGW(TAG, "Print requested but no printer connected");
             lcd_override(0, "NO PRINTER!", 3000);
             continue;
         }
 
-        ESP_LOGI(TAG, "Print requested on %s — rendering label for '%s' (type=%d, days=%d)...",
-                 printer->model->name, msg.name, msg.label_type, msg.days);
+        ESP_LOGI(TAG, "Printing '%s' on %s...", msg.name, printer->model->name);
         lcd_override(0, "PRINTING...", 5000);
         lcd_override(1, msg.name, 5000);
 
-        const uint8_t *fb = nullptr;
-        switch ((label_type_t)msg.label_type) {
-            case LABEL_NAME:
-                fb = label_renderer_render(msg.name);
-                break;
-            case LABEL_SHORT_PARKING:
-                fb = label_renderer_render_parking(msg.name, msg.days, true);
-                break;
-            case LABEL_LONG_PARKING:
-                fb = label_renderer_render_parking(msg.name, msg.days, false);
-                break;
-        }
-
+        const uint8_t *fb = label_renderer_render(msg.name);
         if (fb == nullptr) {
             xSemaphoreGive(s_printer_mutex);
             ESP_LOGE(TAG, "Render failed");
@@ -164,7 +150,6 @@ static void print_task(void *arg) {
             continue;
         }
 
-        ESP_LOGI(TAG, "Sending to printer...");
         char print_err[17] = {};
         bool ok = brother_ql_print(printer, printer->model, fb, print_err, sizeof(print_err));
         xSemaphoreGive(s_printer_mutex);
@@ -183,7 +168,7 @@ static void print_task(void *arg) {
 static uint32_t s_last_card_id = 0;
 static int64_t  s_last_print_time = 0;
 
-static void enqueue_print(uint32_t card_id, const char *name, label_type_t type, uint8_t days) {
+static void enqueue_print(uint32_t card_id, const char *name) {
     int64_t now = esp_timer_get_time();
     if (card_id == s_last_card_id && (now - s_last_print_time) < DEDUP_INTERVAL_US) {
         ESP_LOGI(TAG, "Ignoring duplicate card 0x%08lX (within 10s)", (unsigned long)card_id);
@@ -196,8 +181,6 @@ static void enqueue_print(uint32_t card_id, const char *name, label_type_t type,
     print_msg_t msg;
     strncpy(msg.name, name, sizeof(msg.name) - 1);
     msg.name[sizeof(msg.name) - 1] = '\0';
-    msg.label_type = type;
-    msg.days = days;
     xQueueSend(s_print_queue, &msg, 0);
 }
 
@@ -208,32 +191,20 @@ static const char *get_status_line() {
     if (first_boot || first_ntp)    return "NETWORKING...";
     if (!wifi_is_connected())       return "ERR: NO WIFI";
     if (!sntp_is_synced())          return "ERR: NO NTP";
+    if (card_lookup_count() == 0)   return "ERR: MEMBERDB";
     if (!has_active_printer())      return "ERR: NO PRINTER";
     return nullptr;
 }
 
-// Mode suffix for RHS of line 1
-static const char *get_mode_suffix() {
-    switch (s_active_mode) {
-        case 1: return "NAME";
-        case 2: return "SHORT";
-        case 3: return "LONG";
-        default: return "NAME";
-    }
-}
-
-// Cycle between SCAN CARD / SCAN FOB every 3 seconds, with mode suffix on RHS
-// e.g. "SCAN CARD  NAME" or "SCAN FOB  SHORT"
+// Cycle between SCAN CARD / SCAN FOB every 3 seconds
 #define SCAN_CYCLE_INTERVAL_US (3 * 1000000LL)
 
 static void format_idle_line(char *buf, size_t len, int64_t now) {
     bool show_fob = ((now / SCAN_CYCLE_INTERVAL_US) % 2) == 1;
-    const char *scan = show_fob ? "SCAN FOB" : "SCAN CARD";
-    const char *suffix = get_mode_suffix();
-    snprintf(buf, len, "%-11s%s", scan, suffix);
+    snprintf(buf, len, "%s", show_fob ? "SCAN FOB" : "SCAN CARD");
 }
 
-// Format clock line for line 2: "Apr11 - 20:41:45" (16 chars)
+// Format clock line for line 2
 static const char *MONTH_ABBR[] = {
     "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
 };
@@ -256,45 +227,6 @@ static void format_clock(char *buf, size_t len) {
 // Easter egg: show "SCAN HAND" for 1 second every 392 seconds
 #define EASTER_EGG_INTERVAL_US (392 * 1000000LL)
 #define EASTER_EGG_DURATION_US (1 * 1000000LL)
-
-// Mode 3 state machine
-enum long_term_state_t : uint8_t {
-    LT_IDLE,       // waiting for card scan
-    LT_SELECTING,  // card scanned, selecting days (LED flashing)
-};
-
-static long_term_state_t s_lt_state = LT_IDLE;
-static char s_lt_name[LOOKUP_NAME_MAX] = {};
-static uint32_t s_lt_card_id = 0;
-static int s_lt_days = 3;  // default 3 days
-static int64_t s_lt_timeout = 0;  // auto-cancel after 30s of no interaction
-#define LT_TIMEOUT_US (30 * 1000000LL)
-#define LT_MIN_DAYS 3
-#define LT_MAX_DAYS 7
-#define LED_FLASH_INTERVAL_US (300000LL)  // 300ms half-period = 600ms full cycle
-
-static void lt_cancel() {
-    s_lt_state = LT_IDLE;
-    s_lt_name[0] = '\0';
-    s_lt_card_id = 0;
-    s_lt_days = LT_MIN_DAYS;
-    led_output_set(false);
-}
-
-static void lt_update_lcd() {
-    // Show: "LONG TERM PERMIT" / "N days (end date)"
-    lcd_override(0, "LONG TERM PERMIT", 31000);
-
-    time_t now;
-    time(&now);
-    struct tm ti;
-    time_t end = now + (time_t)s_lt_days * 86400;
-    localtime_r(&end, &ti);
-
-    char buf[17];
-    snprintf(buf, sizeof(buf), "%dd to %02d/%02d", s_lt_days, ti.tm_mon + 1, ti.tm_mday);
-    lcd_override(1, buf, 31000);
-}
 
 static void lcd_update_task(void *arg) {
     char line0[17];
@@ -328,7 +260,7 @@ static void lcd_update_task(void *arg) {
                 strncpy(line0, status, sizeof(line0));
                 line0[sizeof(line0) - 1] = '\0';
             } else if (easter_egg) {
-                snprintf(line0, sizeof(line0), "%-11s%s", "SCAN HAND", get_mode_suffix());
+                snprintf(line0, sizeof(line0), "SCAN HAND");
             } else {
                 format_idle_line(line0, sizeof(line0), now);
             }
@@ -360,13 +292,6 @@ extern "C" void app_main(void) {
     // Create printer mutex
     s_printer_mutex = xSemaphoreCreateMutex();
 
-    // Initialize mode switch
-    mode_switch_init();
-    s_active_mode = mode_switch_read();
-
-    // Initialize LED output
-    led_output_init();
-
     // Create print queue
     s_print_queue = xQueueCreate(4, sizeof(print_msg_t));
 
@@ -378,6 +303,11 @@ extern "C" void app_main(void) {
 
     // Initialize WiFi + SNTP
     wifi_init();
+
+    // Fetch member list from API (if WiFi connected)
+    if (wifi_is_connected()) {
+        card_lookup_refresh();
+    }
 
     // Initialize renderer
     label_renderer_init();
@@ -408,48 +338,24 @@ extern "C" void app_main(void) {
 
     ESP_LOGI(TAG, "System ready — scan RFID card or press button (1s hold) to test print");
 
-    // Main loop: handle RFID scans and button interaction
+    // Main loop: handle RFID scans and button
     uint32_t card_id;
     int64_t btn_press_start = 0;
     bool btn_triggered = false;
-    bool btn_was_down = false;
+    bool cards_loaded = wifi_is_connected();
 
     while (true) {
         int64_t now = esp_timer_get_time();
 
-        // Flash LED in mode 3 LT_SELECTING state
-        if (s_lt_state == LT_SELECTING) {
-            bool led_on = ((now / LED_FLASH_INTERVAL_US) % 2) == 0;
-            led_output_set(led_on);
-
-            // Auto-cancel after timeout
-            if (now > s_lt_timeout) {
-                ESP_LOGI(TAG, "Long-term selection timed out");
-                lt_cancel();
-                lcd_override(0, "TIMED OUT", 2000);
-            }
-        }
-
-        // Poll mode switch for changes
-        uint8_t mode = mode_switch_read();
-        if (mode != s_active_mode) {
-            // Cancel any in-progress long-term selection on mode change
-            if (s_lt_state == LT_SELECTING) {
-                lt_cancel();
-            }
-            s_active_mode = mode;
-            const char *mode_name = "NAME";
-            if (mode == 2) mode_name = "SHORT TERM";
-            else if (mode == 3) mode_name = "LONG TERM";
-            ESP_LOGI(TAG, "Mode switch → %d (%s)", mode, mode_name);
-            char buf[17];
-            snprintf(buf, sizeof(buf), "MODE: %s", mode_name);
-            lcd_override(0, buf, 2000);
+        // Late WiFi connect: fetch card DB if we didn't at boot
+        if (!cards_loaded && wifi_is_connected()) {
+            cards_loaded = true;
+            card_lookup_refresh();
         }
 
         // Check RFID queue (non-blocking)
         if (xQueueReceive(rfid_queue, &card_id, 0) == pdTRUE) {
-            ESP_LOGI(TAG, "RFID card scanned: 0x%08lX (mode %d)", (unsigned long)card_id, s_active_mode);
+            ESP_LOGI(TAG, "RFID card scanned: 0x%08lX", (unsigned long)card_id);
             lookup_result_t result = card_lookup(card_id);
 
             if (!result.found) {
@@ -462,97 +368,28 @@ extern "C" void app_main(void) {
                 lcd_override(1, "NO PRINTER!", 3000);
                 ESP_LOGW(TAG, "Card '%s' OK but no printer", result.name);
             } else {
-                // Card is valid and printer is available
-                switch (s_active_mode) {
-                    case 1:  // Name label — print immediately
-                        buzzer_beep_good();
-                        lcd_override(0, result.name, 3000);
-                        enqueue_print(card_id, result.name, LABEL_NAME, 0);
-                        break;
-
-                    case 2:  // Short-term parking — print immediately with 2-day permit
-                        buzzer_beep_good();
-                        lcd_override(0, result.name, 3000);
-                        lcd_override(1, "2-DAY PERMIT", 3000);
-                        enqueue_print(card_id, result.name, LABEL_SHORT_PARKING, 2);
-                        break;
-
-                    case 3:  // Long-term parking — enter selection mode
-                        buzzer_beep_good();
-                        s_lt_state = LT_SELECTING;
-                        strncpy(s_lt_name, result.name, sizeof(s_lt_name) - 1);
-                        s_lt_name[sizeof(s_lt_name) - 1] = '\0';
-                        s_lt_card_id = card_id;
-                        s_lt_days = LT_MIN_DAYS;
-                        s_lt_timeout = now + LT_TIMEOUT_US;
-                        lt_update_lcd();
-                        ESP_LOGI(TAG, "Long-term mode: '%s', select days (3-7), long-press to print",
-                                 result.name);
-                        break;
-                }
+                buzzer_beep_good();
+                lcd_override(0, result.name, 3000);
+                enqueue_print(card_id, result.name);
             }
         }
 
-        // Button handling
+        // Button handling: long press = test print
         bool btn_down = gpio_get_level(BUTTON_GPIO) == 0;
-
-        if (s_lt_state == LT_SELECTING) {
-            // Mode 3 selecting: short press = cycle days, long press = print
-            if (btn_down) {
-                if (btn_press_start == 0) {
-                    btn_press_start = now;
-                } else if (!btn_triggered && (now - btn_press_start) >= 1000000LL) {
-                    // Long press — print the permit
-                    btn_triggered = true;
-                    ESP_LOGI(TAG, "Long press — printing %d-day permit for '%s'", s_lt_days, s_lt_name);
-                    lcd_override(0, "PRINTING...", 5000);
-                    lcd_override(1, s_lt_name, 5000);
-                    enqueue_print(s_lt_card_id, s_lt_name, LABEL_LONG_PARKING, s_lt_days);
-                    lt_cancel();
-                }
-            } else {
-                // Button released
-                if (btn_was_down && !btn_triggered && btn_press_start != 0) {
-                    // Short press — cycle days
-                    s_lt_days++;
-                    if (s_lt_days > LT_MAX_DAYS) s_lt_days = LT_MIN_DAYS;
-                    s_lt_timeout = now + LT_TIMEOUT_US;  // reset timeout
-                    lt_update_lcd();
-                    ESP_LOGI(TAG, "Long-term days: %d", s_lt_days);
-                }
-                btn_press_start = 0;
-                btn_triggered = false;
+        if (btn_down) {
+            if (btn_press_start == 0) {
+                btn_press_start = now;
+            } else if (!btn_triggered && (now - btn_press_start) >= 1000000LL) {
+                btn_triggered = true;
+                ESP_LOGI(TAG, "Button held 1s — test print");
+                lcd_override(0, "Test print...", 3000);
+                enqueue_print(0, "TEST");
             }
         } else {
-            // Normal mode: long press = test print
-            if (btn_down) {
-                if (btn_press_start == 0) {
-                    btn_press_start = now;
-                } else if (!btn_triggered && (now - btn_press_start) >= 1000000LL) {
-                    btn_triggered = true;
-                    ESP_LOGI(TAG, "Button held 1s — test print (mode %d)", s_active_mode);
-                    lcd_override(0, "Test print...", 3000);
-                    switch (s_active_mode) {
-                        case 1:
-                            enqueue_print(0, "TEST", LABEL_NAME, 0);
-                            break;
-                        case 2:
-                            enqueue_print(0, "TEST", LABEL_SHORT_PARKING, 2);
-                            break;
-                        case 3:
-                            enqueue_print(0, "TEST", LABEL_LONG_PARKING, 5);
-                            break;
-                    }
-                }
-            } else {
-                btn_press_start = 0;
-                btn_triggered = false;
-            }
+            btn_press_start = 0;
+            btn_triggered = false;
         }
 
-        btn_was_down = btn_down;
-
-        // Small delay to avoid busy-spinning
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

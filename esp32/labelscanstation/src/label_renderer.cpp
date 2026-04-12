@@ -35,12 +35,6 @@ static inline void set_pixel(int x, int y) {
     s_framebuffer[y * LABEL_FB_STRIDE + x / 8] |= (0x80 >> (x % 8));
 }
 
-// Draw a horizontal line
-static void draw_hline(int x0, int x1, int y) {
-    for (int x = x0; x <= x1; x++)
-        set_pixel(x, y);
-}
-
 // Blit an 8-bit grayscale glyph bitmap into the framebuffer, rotated 90° CCW.
 // In rotated coordinates: text's x → fb +y, text's y → fb -x.
 // origin_fb_x is the baseline x in fb (top of text), origin_fb_y is the left edge.
@@ -102,32 +96,6 @@ static int render_string_rot(const char *str, float scale, int fb_x, int fb_y) {
         p++;
     }
     return (int)(x_pos + 0.5f);
-}
-
-// Measure string width in pixels at given scale
-static int measure_string(const char *str, float scale) {
-    float x_pos = 0;
-    const char *p = str;
-    while (*p) {
-        int ch = (unsigned char)*p;
-        int advance, lsb;
-        stbtt_GetCodepointHMetrics(&s_font, ch, &advance, &lsb);
-        x_pos += advance * scale;
-        if (*(p + 1)) {
-            int kern = stbtt_GetCodepointKernAdvance(&s_font, ch, (unsigned char)*(p + 1));
-            x_pos += kern * scale;
-        }
-        p++;
-    }
-    return (int)(x_pos + 0.5f);
-}
-
-// Render a string centered in a y-region
-static void render_string_rot_centered(const char *str, float scale, int fb_x,
-                                        int y_start, int y_end) {
-    int w = measure_string(str, scale);
-    int fb_y = y_start + (y_end - y_start - w) / 2;
-    render_string_rot(str, scale, fb_x, fb_y);
 }
 
 // Draw the i3 logo bitmap at position (dst_x, dst_y) in the framebuffer, rotated 90° CCW.
@@ -215,93 +183,3 @@ const uint8_t *label_renderer_render(const char *name) {
     return s_framebuffer;
 }
 
-// Parking permit label layout:
-//   Line 1 (large): "Short Term Parking Permit" or "Long Term Parking Permit"
-//   Line 2 (medium): member name
-//   Line 3 (medium): "Valid From: YYYY-MM-DD"
-//   Line 4 (medium): "To: YYYY-MM-DD"
-// All text rotated 90° CCW. Logo at top.
-
-#define TITLE_PX_HEIGHT   74   // ~7mm
-#define PERMIT_NAME_PX    84   // ~8mm
-#define DETAIL_PX_HEIGHT  53   // ~5mm
-
-const uint8_t *label_renderer_render_parking(const char *name, int days, bool short_term) {
-    if (!s_font_ready) {
-        ESP_LOGE(TAG, "Font not initialized");
-        return nullptr;
-    }
-
-    memset(s_framebuffer, 0, LABEL_FB_SIZE);
-
-    float title_scale = stbtt_ScaleForPixelHeight(&s_font, TITLE_PX_HEIGHT);
-    float name_scale = stbtt_ScaleForPixelHeight(&s_font, PERMIT_NAME_PX);
-    float detail_scale = stbtt_ScaleForPixelHeight(&s_font, DETAIL_PX_HEIGHT);
-
-    int ascent, descent, line_gap;
-    stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &line_gap);
-
-    // Logo — rotated 90° CCW, 2x scaled, centered
-    int logo_scale = 2;
-    int logo_x = (LABEL_PRINTABLE_W - I3LOGO_HEIGHT * logo_scale) / 2;
-    int logo_y = 20;
-    draw_logo(logo_x, logo_y, logo_scale);
-
-    int text_y_start = logo_y + I3LOGO_WIDTH * logo_scale + 20;
-
-    // Layout: 4 lines stacked from top (high fb_x) to bottom (low fb_x)
-    // "top" in rotated space = high fb_x value
-    int top_margin = 10;
-    int line_spacing = 10;  // px gap between lines
-
-    // Line 1: Title (near top)
-    int title_height = (int)((ascent - descent) * title_scale + 0.5f);
-    int title_fb_x = LABEL_PRINTABLE_W - top_margin - (int)(-descent * title_scale + 0.5f);
-    const char *title = short_term ? "Short Term" : "Long Term";
-    render_string_rot(title, title_scale, title_fb_x, text_y_start);
-
-    // Line 2: "Parking Permit" subtitle
-    int subtitle_fb_x = title_fb_x - title_height - line_spacing;
-    render_string_rot("Parking Permit", title_scale, subtitle_fb_x, text_y_start);
-
-    // Line 3: Name
-    int name_height = (int)((ascent - descent) * name_scale + 0.5f);
-    int name_fb_x = subtitle_fb_x - title_height - line_spacing * 2;
-    render_string_rot(name, name_scale, name_fb_x, text_y_start);
-
-    // Compute dates
-    time_t now;
-    time(&now);
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-
-    char from_str[48];
-    char to_str[48];
-
-    if (timeinfo.tm_year > (2020 - 1900)) {
-        char date_buf[16];
-        strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &timeinfo);
-        snprintf(from_str, sizeof(from_str), "From: %s", date_buf);
-
-        time_t end = now + (time_t)days * 86400;
-        struct tm end_info;
-        localtime_r(&end, &end_info);
-        strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &end_info);
-        snprintf(to_str, sizeof(to_str), "To:   %s", date_buf);
-    } else {
-        snprintf(from_str, sizeof(from_str), "From: (no time sync)");
-        snprintf(to_str, sizeof(to_str), "To:   (no time sync)");
-    }
-
-    // Line 4: From date
-    int detail_height = (int)((ascent - descent) * detail_scale + 0.5f);
-    int from_fb_x = name_fb_x - name_height - line_spacing;
-    render_string_rot(from_str, detail_scale, from_fb_x, text_y_start);
-
-    // Line 5: To date
-    int to_fb_x = from_fb_x - detail_height - line_spacing;
-    render_string_rot(to_str, detail_scale, to_fb_x, text_y_start);
-
-    ESP_LOGI(TAG, "Parking permit rendered: '%s' %d days (%s)", name, days, short_term ? "short" : "long");
-    return s_framebuffer;
-}

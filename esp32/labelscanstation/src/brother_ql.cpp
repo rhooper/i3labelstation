@@ -326,6 +326,13 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
                 ESP_LOGI(TAG, "Detected width: %dmm", media_width);
             }
 
+            // Reject non-29mm media
+            if (init_status.media_width > 0 && init_status.media_width != LABEL_WIDTH_MM) {
+                ESP_LOGE(TAG, "Wrong media width: %dmm (need %dmm)", init_status.media_width, LABEL_WIDTH_MM);
+                set_error(error_msg, error_msg_len, "LOAD 29MM");
+                return false;
+            }
+
             // For continuous media, length = 0 in the command (raster line count determines length)
             if (media_type == MEDIA_CONTINUOUS) {
                 media_length = 0;

@@ -12,8 +12,6 @@ idf_component_register(
         "lcd_display.cpp"
         "card_lookup.cpp"
         "buzzer.cpp"
-        "mode_switch.cpp"
-        "led_output.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         usb
@@ -24,4 +22,6 @@ idf_component_register(
         nvs_flash
         lwip
         esp_timer
+        esp_http_client
+        json
 )

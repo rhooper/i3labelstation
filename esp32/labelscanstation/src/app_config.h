@@ -42,16 +42,6 @@
 // Buzzer (passive piezo via PWM)
 #define BUZZER_GPIO         GPIO_NUM_38
 
-// Mode switch
-#define MODE_PIN1           GPIO_NUM_37
-#define MODE_PIN2           GPIO_NUM_36
-
-// LED output (active HIGH to illuminate)
-#define LED_OUTPUT_GPIO     GPIO_NUM_35
-
-// Input pin (feature TBD)
-#define INPUT_GPIO          GPIO_NUM_39
-
 // Max printers supported via USB hub
 #define MAX_PRINTERS        3
 
