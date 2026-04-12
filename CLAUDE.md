@@ -1,7 +1,7 @@
 # Label Scan Station
 
 ## Project Overview
-ESP32-S3 based label printer (Brother QL-500) + RFID card reader for i3 Detroit makerspace. Scans member RFID cards, looks up names, and prints name labels.
+ESP32-S3 based label printer (Brother QL series) + RFID card reader for i3 Detroit makerspace. Scans member RFID cards, looks up names, and prints name labels.
 
 ## Current State (2026-04-11)
 Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approach abandoned.
@@ -9,7 +9,8 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 ### What Works
 - RFID card scanning (125kHz via UART)
 - Card lookup from compiled-in database (`cards.tsv` → `card_db.h`)
-- Brother QL-500 USB printing (hotplug detection)
+- Brother QL USB printing with multi-model support (hotplug detection)
+- Supported models: QL-500, QL-550, QL-560, QL-570, QL-580N, QL-650TD, QL-700, QL-710W, QL-720NW, QL-800, QL-810W, QL-820NWB
 - 16x2 HD44780 LCD status display with clock (America/Detroit timezone, auto DST)
 - Buzzer feedback: good beep (C7), bad buzz (C4→A♭4), sad beep (C5→G4→E4 when no printer)
 - WiFi + SNTP with nightly resync at random time (midnight–5AM)
@@ -38,9 +39,10 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 | 43/44 | UART0 (serial logs) |
 | 48 | WS2812 RGB LED |
 
-### Brother QL-500
-- USB VID: 0x04F9, PID: 0x2015
+### Brother QL Printers
+- USB VID: 0x04F9 (all models), PIDs vary per model (see `ql_models.cpp`)
 - Self-powered, needs VBUS 5V for USB pull-up
+- Model capabilities (invalidate count, mode setting, cutting, etc.) auto-detected from PID
 
 ## Build Instructions
 
@@ -78,7 +80,8 @@ while True:
 | `wifi_manager.*` | WiFi STA + SNTP with nightly resync task |
 | `usb_host_task.*` | USB host driver with PHY init for OTG mode |
 | `usb_printer.*` | USB printer endpoint discovery + bulk transfer |
-| `brother_ql.*` | Brother QL raster protocol encoding |
+| `brother_ql.*` | Brother QL raster protocol encoding (model-aware) |
+| `ql_models.*` | Printer model registry (PID → capabilities lookup) |
 | `label_renderer.*` | TTF label rendering via stb_truetype (306×991 1-bit) |
 | `card_lookup.*` | Card ID → name lookup from compiled-in DB |
 | `card_db.h` | Auto-generated from `cards.tsv` (do not edit) |
@@ -105,9 +108,8 @@ while True:
 - Runs automatically on each build (PlatformIO pre-build script)
 - Only known cards trigger printing; unknown cards get error buzz
 
-### Brother QL Protocol (QL-500 — minimal)
-No compression, no mode setting, no cutting, no expanded mode.
-Command sequence: invalidate(200×0x00) → init(0x1B 0x40) → status_request(0x1B 0x69 0x53) → media_quality(0x1B 0x69 0x7A + 10 bytes) → margins(0x1B 0x69 0x64 + 2 bytes) → raster_rows(0x67 0x00 + 90 bytes each) → print(0x1A)
+### Brother QL Protocol (multi-model)
+Command sequence adapts per model: invalidate(200 or 400 × 0x00) → init(0x1B 0x40) → status_request(0x1B 0x69 0x53) → [mode_setting if supported] → [expanded_mode if supported] → media_quality(0x1B 0x69 0x7A + 10 bytes) → [auto_cut if supported] → margins(0x1B 0x69 0x64 + 2 bytes) → raster_rows(0x67 0x00 + 90 bytes each) → print(0x1A)
 
 ## Conventions
 - Use `.venv/bin/python` and `.venv/bin/platformio` — never `source activate`
