@@ -211,14 +211,25 @@ static const char *get_status_line() {
     return nullptr;
 }
 
-// Mode-specific idle text for line 1
-static const char *get_mode_idle_text() {
+// Mode suffix for RHS of line 1
+static const char *get_mode_suffix() {
     switch (s_active_mode) {
-        case 1: return "SCAN CARD";
-        case 2: return "SHORT TERM PKG";
-        case 3: return "LONG TERM PKG";
-        default: return "SCAN CARD";
+        case 1: return "NAME";
+        case 2: return "SHORT";
+        case 3: return "LONG";
+        default: return "NAME";
     }
+}
+
+// Cycle between SCAN CARD / SCAN FOB every 3 seconds, with mode suffix on RHS
+// e.g. "SCAN CARD  NAME" or "SCAN FOB  SHORT"
+#define SCAN_CYCLE_INTERVAL_US (3 * 1000000LL)
+
+static void format_idle_line(char *buf, size_t len, int64_t now) {
+    bool show_fob = ((now / SCAN_CYCLE_INTERVAL_US) % 2) == 1;
+    const char *scan = show_fob ? "SCAN FOB" : "SCAN CARD";
+    const char *suffix = get_mode_suffix();
+    snprintf(buf, len, "%-11s%s", scan, suffix);
 }
 
 // Format clock line for line 2: "Apr11 - 20:41:45" (16 chars)
@@ -315,11 +326,10 @@ static void lcd_update_task(void *arg) {
             if (status) {
                 strncpy(line0, status, sizeof(line0));
                 line0[sizeof(line0) - 1] = '\0';
-            } else if (easter_egg && s_active_mode == 1) {
-                strncpy(line0, "SCAN HAND", sizeof(line0));
+            } else if (easter_egg) {
+                snprintf(line0, sizeof(line0), "%-11s%s", "SCAN HAND", get_mode_suffix());
             } else {
-                strncpy(line0, get_mode_idle_text(), sizeof(line0));
-                line0[sizeof(line0) - 1] = '\0';
+                format_idle_line(line0, sizeof(line0), now);
             }
             format_clock(line1, sizeof(line1));
 

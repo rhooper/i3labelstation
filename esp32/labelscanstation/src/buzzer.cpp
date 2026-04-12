@@ -67,8 +67,19 @@ static const buzzer_note_t *s_melodies[] = {
 static QueueHandle_t s_buzzer_queue = nullptr;
 
 static void buzzer_tone(uint32_t freq_hz, uint32_t duration_ms) {
-    ledc_set_freq(BUZZER_LEDC_MODE, BUZZER_LEDC_TIMER, freq_hz);
-    ledc_set_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL, 128);
+    // Reconfigure timer for this frequency (resolution auto-selected)
+    ledc_timer_config_t t = {};
+    t.speed_mode = BUZZER_LEDC_MODE;
+    t.timer_num = BUZZER_LEDC_TIMER;
+    t.duty_resolution = LEDC_TIMER_10_BIT;
+    t.freq_hz = freq_hz;
+    t.clk_cfg = LEDC_AUTO_CLK;
+    // Try decreasing resolution until it works
+    while (ledc_timer_config(&t) != ESP_OK && t.duty_resolution > LEDC_TIMER_1_BIT) {
+        t.duty_resolution = (ledc_timer_bit_t)(t.duty_resolution - 1);
+    }
+    uint32_t max_duty = (1U << t.duty_resolution);
+    ledc_set_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL, max_duty / 2);
     ledc_update_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL);
 
     vTaskDelay(pdMS_TO_TICKS(duration_ms));
@@ -102,7 +113,7 @@ void buzzer_init() {
     ledc_timer_config_t timer_conf = {};
     timer_conf.speed_mode = BUZZER_LEDC_MODE;
     timer_conf.timer_num = BUZZER_LEDC_TIMER;
-    timer_conf.duty_resolution = LEDC_TIMER_8_BIT;
+    timer_conf.duty_resolution = LEDC_TIMER_10_BIT;
     timer_conf.freq_hz = 1000;
     timer_conf.clk_cfg = LEDC_AUTO_CLK;
     ESP_ERROR_CHECK(ledc_timer_config(&timer_conf));
