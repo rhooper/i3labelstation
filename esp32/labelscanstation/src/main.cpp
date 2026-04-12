@@ -60,20 +60,21 @@ static bool lcd_override_active() {
     return esp_timer_get_time() < s_lcd_override_until;
 }
 
-// Get the active printer based on mode switch (mode 1/2/3 → index 0/1/2)
-// Caller must hold s_printer_mutex
+// Get the first connected printer. Caller must hold s_printer_mutex.
 static PrinterState *get_active_printer() {
-    uint8_t idx = s_active_mode - 1;  // mode is 1-based
-    if (idx < MAX_PRINTERS && s_printers[idx].connected)
-        return &s_printers[idx];
+    for (int i = 0; i < MAX_PRINTERS; i++) {
+        if (s_printers[i].connected)
+            return &s_printers[i];
+    }
     return nullptr;
 }
 
-// Check if any printer is connected for the active mode (lock-free for status display)
+// Check if any printer is connected (lock-free for status display)
 static bool has_active_printer() {
-    uint8_t idx = s_active_mode - 1;
-    if (idx < MAX_PRINTERS)
-        return s_printers[idx].connected;
+    for (int i = 0; i < MAX_PRINTERS; i++) {
+        if (s_printers[i].connected)
+            return true;
+    }
     return false;
 }
 
@@ -437,19 +438,13 @@ extern "C" void app_main(void) {
                 lt_cancel();
             }
             s_active_mode = mode;
-            ESP_LOGI(TAG, "Mode switch → %d", mode);
-            xSemaphoreTake(s_printer_mutex, portMAX_DELAY);
-            PrinterState *p = get_active_printer();
-            if (p && p->model) {
-                char buf[17];
-                snprintf(buf, sizeof(buf), "%d: %s", mode, p->model->name);
-                lcd_override(0, buf, 2000);
-            } else {
-                char buf[17];
-                snprintf(buf, sizeof(buf), "MODE %d (empty)", mode);
-                lcd_override(0, buf, 2000);
-            }
-            xSemaphoreGive(s_printer_mutex);
+            const char *mode_name = "NAME";
+            if (mode == 2) mode_name = "SHORT TERM";
+            else if (mode == 3) mode_name = "LONG TERM";
+            ESP_LOGI(TAG, "Mode switch → %d (%s)", mode, mode_name);
+            char buf[17];
+            snprintf(buf, sizeof(buf), "MODE: %s", mode_name);
+            lcd_override(0, buf, 2000);
         }
 
         // Check RFID queue (non-blocking)
