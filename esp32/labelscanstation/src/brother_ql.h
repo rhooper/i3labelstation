@@ -21,6 +21,9 @@ struct BrotherQLStatus {
 // Parse a 32-byte status response from the printer.
 BrotherQLStatus brother_ql_parse_status(const uint8_t *data, size_t len);
 
+// Send command to disable auto power-off. Persists on printer.
+bool brother_ql_disable_auto_off(PrinterState *printer, const ql_model_t *model);
+
 // Print a label: stream header + raster rows + print command, then read status.
 // framebuffer: 1-bit packed pixel data (MSB first), LABEL_FB_STRIDE * LABEL_PRINTABLE_H bytes.
 // model: printer model capabilities (invalidate count, mode setting, etc.)

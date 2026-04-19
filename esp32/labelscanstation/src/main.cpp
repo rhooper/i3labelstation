@@ -102,6 +102,7 @@ static void on_printer_event(usb_device_handle_t dev_handle, bool connected, con
         }
         s_printers[slot].model = model;
         if (printer_on_connected(&s_printers[slot], dev_handle, usb_host_get_client_handle())) {
+            brother_ql_disable_auto_off(&s_printers[slot], model);
             ESP_LOGI(TAG, "Printer %d ready (%s)", slot + 1, model->name);
         } else {
             ESP_LOGE(TAG, "Printer connection setup failed");

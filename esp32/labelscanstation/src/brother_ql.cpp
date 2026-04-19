@@ -266,6 +266,34 @@ static void set_error(char *error_msg, size_t error_msg_len, const char *msg) {
         snprintf(error_msg, error_msg_len, "%s", msg);
 }
 
+bool brother_ql_disable_auto_off(PrinterState *printer, const ql_model_t *model) {
+    size_t pos = 0;
+
+    // Invalidate + init only (no status request — avoids stale USB response)
+    memset(s_cmd_buf + pos, 0x00, model->num_invalidate);
+    pos += model->num_invalidate;
+
+    s_cmd_buf[pos++] = CMD_ESC;
+    s_cmd_buf[pos++] = CMD_INIT;
+
+    // ESC i U A 0x00 0x00 — disable auto power-off
+    s_cmd_buf[pos++] = CMD_ESC;
+    s_cmd_buf[pos++] = CMD_STATUS_INFO;  // 0x69 = 'i'
+    s_cmd_buf[pos++] = 0x55;             // 'U'
+    s_cmd_buf[pos++] = 0x41;             // 'A' (auto power-off subcommand)
+    s_cmd_buf[pos++] = 0x00;             // timeout LSB (0 = disabled)
+    s_cmd_buf[pos++] = 0x00;             // timeout MSB
+
+    esp_err_t err = printer_send(printer, s_cmd_buf, pos);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to disable auto power-off on %s: %s", model->name, esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Disabled auto power-off on %s", model->name);
+    return true;
+}
+
 bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint8_t *framebuffer,
                       char *error_msg, size_t error_msg_len) {
     if (error_msg && error_msg_len > 0) error_msg[0] = '\0';
