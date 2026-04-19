@@ -211,7 +211,7 @@ const uint8_t *label_renderer_render(const char *name) {
     // Name — top-aligned, with word wrapping if too long
     int name_descent_px = (int)(-descent * name_scale + 0.5f);
     int name_line_height = (int)((ascent - descent) * name_scale + 0.5f);
-    int name_top_margin = 15;
+    int name_top_margin = 0;
     int name_fb_x = LABEL_PRINTABLE_W - name_top_margin - name_descent_px;
     int max_line_width = LABEL_PRINTABLE_H - text_y_start - 20;
 
@@ -256,7 +256,7 @@ const uint8_t *label_renderer_render(const char *name) {
             }
 
             render_string_rot(line, name_scale, cur_fb_x, text_y_start);
-            cur_fb_x -= name_line_height + 5;  // 5px line gap
+            cur_fb_x -= name_line_height + 2;  // 2px line gap (reduced)
             line_start = line_end;
         }
     }
