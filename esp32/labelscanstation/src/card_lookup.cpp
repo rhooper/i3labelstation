@@ -5,10 +5,13 @@
 #include <cstring>
 #include <cstdlib>
 #include <cctype>
+#include <ctime>
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "cJSON.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "card_lookup";
 
@@ -24,6 +27,9 @@ typedef struct {
 static card_entry_t *s_cards = nullptr;
 static int s_card_count = 0;
 static int s_card_capacity = 0;
+static time_t s_last_refresh = 0;  // unix timestamp of last successful refresh
+
+#define STALE_THRESHOLD_SECS (16 * 3600)  // 16 hours
 
 static bool add_entry(card_entry_t **cards, int *count, int *capacity,
                       uint32_t card_id, const char *name);
@@ -290,6 +296,7 @@ bool card_lookup_refresh() {
         s_card_count = new_count;
         s_card_capacity = new_capacity;
         merge_extra_cards();
+        time(&s_last_refresh);
         ESP_LOGI(TAG, "Loaded %d card entries (%d from API + extras)", s_card_count, new_count);
         return true;
     }
@@ -298,4 +305,40 @@ bool card_lookup_refresh() {
     free(new_cards);
     ESP_LOGE(TAG, "API fetch failed, card DB has %d entries", s_card_count);
     return false;
+}
+
+bool card_lookup_is_stale() {
+    if (s_last_refresh == 0) return false;  // never refreshed yet — handled by count==0
+    time_t now;
+    time(&now);
+    return (now - s_last_refresh) > STALE_THRESHOLD_SECS;
+}
+
+// Background task: refresh DB at 10:00 and 22:00 daily
+static void card_refresh_task(void *arg) {
+    while (true) {
+        // Sleep 60s between checks
+        vTaskDelay(pdMS_TO_TICKS(60000));
+
+        time_t now;
+        time(&now);
+        struct tm ti;
+        localtime_r(&now, &ti);
+
+        // Only proceed if time is synced (year > 2020)
+        if (ti.tm_year < (2020 - 1900)) continue;
+
+        // Refresh at 10:00 and 22:00 (within the first minute of the hour)
+        if ((ti.tm_hour == 10 || ti.tm_hour == 22) && ti.tm_min == 0) {
+            ESP_LOGI(TAG, "Scheduled DB refresh at %02d:%02d", ti.tm_hour, ti.tm_min);
+            card_lookup_refresh();
+            // Sleep past the trigger minute to avoid re-triggering
+            vTaskDelay(pdMS_TO_TICKS(61000));
+        }
+    }
+}
+
+void card_lookup_start_refresh_task() {
+    xTaskCreate(card_refresh_task, "card_refresh", 8192, nullptr, 1, nullptr);
+    ESP_LOGI(TAG, "Card refresh task started (10:00 / 22:00 daily)");
 }
