@@ -22,6 +22,7 @@ esp32/labelscanstation/src/secrets.h
 .vscode/
 
 # Member data
+fetch_members*
 cards.tsv
 codes.csv
 members-offset-*.json
