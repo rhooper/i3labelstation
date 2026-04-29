@@ -2,8 +2,11 @@
 
 #include <cstdint>
 #include <cstddef>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "usb/usb_host.h"
 #include "ql_models.h"
+#include "esp_err.h"
 
 // Printer connection state
 struct PrinterState {
@@ -16,6 +19,11 @@ struct PrinterState {
     uint16_t bulk_out_mps;
     uint16_t bulk_in_mps;
     bool connected;
+
+    // Per-printer synchronous transfer state (avoids global shared between printers)
+    SemaphoreHandle_t xfer_done;
+    esp_err_t xfer_result;
+    int xfer_actual_len;
 };
 
 // Initialize printer state

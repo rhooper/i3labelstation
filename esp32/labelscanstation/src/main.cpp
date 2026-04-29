@@ -73,13 +73,15 @@ static PrinterState *get_active_printer() {
     return best;
 }
 
-// Check if any printer is connected (lock-free for status display)
+// Check if any printer is connected.
 static bool has_active_printer() {
+    xSemaphoreTake(s_printer_mutex, portMAX_DELAY);
+    bool found = false;
     for (int i = 0; i < MAX_PRINTERS; i++) {
-        if (s_printers[i].connected)
-            return true;
+        if (s_printers[i].connected) { found = true; break; }
     }
-    return false;
+    xSemaphoreGive(s_printer_mutex);
+    return found;
 }
 
 static void on_printer_event(usb_device_handle_t dev_handle, bool connected, const ql_model_t *model) {
@@ -135,30 +137,36 @@ static void print_task(void *arg) {
         if (xQueueReceive(s_print_queue, &msg, portMAX_DELAY) != pdTRUE)
             continue;
 
-        xSemaphoreTake(s_printer_mutex, portMAX_DELAY);
-        PrinterState *printer = get_active_printer();
-        if (!printer) {
-            xSemaphoreGive(s_printer_mutex);
-            ESP_LOGW(TAG, "Print requested but no printer connected");
-            lcd_override(0, "NO PRINTER!", 3000);
-            continue;
-        }
-
-        ESP_LOGI(TAG, "Printing '%s' on %s...", msg.name, printer->model->name);
-        lcd_override(0, "PRINTING...", 5000);
-        lcd_override(1, msg.name, 5000);
-
+        // Render first — pure computation, no shared state, can be slow
         const uint8_t *fb = label_renderer_render(msg.name);
         if (fb == nullptr) {
-            xSemaphoreGive(s_printer_mutex);
             ESP_LOGE(TAG, "Render failed");
             lcd_override(0, "RENDER ERROR", 3000);
             continue;
         }
 
-        char print_err[17] = {};
-        bool ok = brother_ql_print(printer, printer->model, fb, print_err, sizeof(print_err));
+        // Brief lock: get printer pointer and model, then release.
+        // USB I/O runs without the lock so a disconnect callback can't deadlock
+        // waiting for it while we're blocked on a transfer.
+        xSemaphoreTake(s_printer_mutex, portMAX_DELAY);
+        PrinterState *printer = get_active_printer();
+        const ql_model_t *model = printer ? printer->model : nullptr;
         xSemaphoreGive(s_printer_mutex);
+
+        if (!printer) {
+            ESP_LOGW(TAG, "Print requested but no printer connected");
+            lcd_override(0, "NO PRINTER!", 3000);
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Printing '%s' on %s...", msg.name, model->name);
+        lcd_override(0, "PRINTING...", 5000);
+        lcd_override(1, msg.name, 5000);
+
+        // USB I/O without the mutex. printer_send() checks state->connected
+        // internally and will fail cleanly if the printer disconnects mid-print.
+        char print_err[17] = {};
+        bool ok = brother_ql_print(printer, model, fb, print_err, sizeof(print_err));
 
         ESP_LOGI(TAG, "Print %s", ok ? "succeeded" : "FAILED");
         if (!ok) {
