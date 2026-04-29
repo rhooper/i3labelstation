@@ -15,7 +15,10 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include "esp_crt_bundle.h"
+
+// ESP-IDF cert bundle embedded in firmware for HTTPS validation
+extern const uint8_t x509_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
+extern const uint8_t x509_crt_bundle_end[]   asm("_binary_x509_crt_bundle_end");
 
 static const char *TAG = "card_lookup";
 
@@ -167,7 +170,8 @@ bool card_lookup_refresh() {
 
     // Create TLS client with ESP-IDF root CA bundle for HTTPS
     WiFiClientSecure secureClient;
-    secureClient.setCACertBundle(esp_crt_bundle_attach);
+    secureClient.setCACertBundle(x509_crt_bundle_start,
+                                x509_crt_bundle_end - x509_crt_bundle_start);
 
     do {
         char url[256];
