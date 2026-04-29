@@ -1,7 +1,6 @@
 #include "buzzer.h"
 #include "app_config.h"
 
-#include "driver/ledc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -9,14 +8,10 @@
 
 static const char *TAG = "buzzer";
 
-#define BUZZER_LEDC_TIMER   LEDC_TIMER_1
-#define BUZZER_LEDC_CHANNEL LEDC_CHANNEL_1
-#define BUZZER_LEDC_MODE    LEDC_LOW_SPEED_MODE
-
 // BPM 120: quarter = 500ms, eighth = 250ms
-#define BPM 120
-#define QUARTER_MS (60000 / BPM)  // 500ms
-#define EIGHTH_MS  (QUARTER_MS / 2)  // 250ms
+#define BPM         120
+#define QUARTER_MS  (60000 / BPM)
+#define EIGHTH_MS   (QUARTER_MS / 2)
 
 // Note frequencies (Hz)
 #define NOTE_C4   262
@@ -26,7 +21,6 @@ static const char *TAG = "buzzer";
 #define NOTE_C5   523
 #define NOTE_C7  2093
 
-// A note: frequency + duration. freq=0 means silence (rest).
 struct buzzer_note_t {
     uint16_t freq_hz;
     uint16_t duration_ms;
@@ -38,11 +32,10 @@ enum buzzer_melody_t : uint8_t {
     MELODY_SAD,
 };
 
-// Note sequences for each melody
 static const buzzer_note_t s_melody_good[] = {
     {NOTE_C7, QUARTER_MS * 80 / 100}, {0, QUARTER_MS * 20 / 100},
     {NOTE_C7, QUARTER_MS * 80 / 100}, {0, QUARTER_MS * 20 / 100},
-    {0, 0}  // sentinel
+    {0, 0}
 };
 
 static const buzzer_note_t s_melody_bad[] = {
@@ -67,25 +60,9 @@ static const buzzer_note_t *s_melodies[] = {
 static QueueHandle_t s_buzzer_queue = nullptr;
 
 static void buzzer_tone(uint32_t freq_hz, uint32_t duration_ms) {
-    // Reconfigure timer for this frequency (resolution auto-selected)
-    ledc_timer_config_t t = {};
-    t.speed_mode = BUZZER_LEDC_MODE;
-    t.timer_num = BUZZER_LEDC_TIMER;
-    t.duty_resolution = LEDC_TIMER_10_BIT;
-    t.freq_hz = freq_hz;
-    t.clk_cfg = LEDC_AUTO_CLK;
-    // Try decreasing resolution until it works
-    while (ledc_timer_config(&t) != ESP_OK && t.duty_resolution > LEDC_TIMER_1_BIT) {
-        t.duty_resolution = (ledc_timer_bit_t)(t.duty_resolution - 1);
-    }
-    uint32_t max_duty = (1U << t.duty_resolution);
-    ledc_set_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL, max_duty / 2);
-    ledc_update_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL);
-
+    ledcWriteTone(BUZZER_GPIO, freq_hz);
     vTaskDelay(pdMS_TO_TICKS(duration_ms));
-
-    ledc_set_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL, 0);
-    ledc_update_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL);
+    ledcWrite(BUZZER_GPIO, 0);
 }
 
 static void buzzer_task(void *arg) {
@@ -110,27 +87,9 @@ static void buzzer_task(void *arg) {
 }
 
 void buzzer_init() {
-    ledc_timer_config_t timer_conf = {};
-    timer_conf.speed_mode = BUZZER_LEDC_MODE;
-    timer_conf.timer_num = BUZZER_LEDC_TIMER;
-    timer_conf.duty_resolution = LEDC_TIMER_10_BIT;
-    timer_conf.freq_hz = 1000;
-    timer_conf.clk_cfg = LEDC_AUTO_CLK;
-    ESP_ERROR_CHECK(ledc_timer_config(&timer_conf));
-
-    ledc_channel_config_t ch_conf = {};
-    ch_conf.speed_mode = BUZZER_LEDC_MODE;
-    ch_conf.channel = BUZZER_LEDC_CHANNEL;
-    ch_conf.timer_sel = BUZZER_LEDC_TIMER;
-    ch_conf.intr_type = LEDC_INTR_DISABLE;
-    ch_conf.gpio_num = BUZZER_GPIO;
-    ch_conf.duty = 0;
-    ch_conf.hpoint = 0;
-    ESP_ERROR_CHECK(ledc_channel_config(&ch_conf));
-
+    ledcAttach(BUZZER_GPIO, 1000, 10);
     s_buzzer_queue = xQueueCreate(4, sizeof(buzzer_melody_t));
     xTaskCreate(buzzer_task, "buzzer", 2048, nullptr, 2, nullptr);
-
     ESP_LOGI(TAG, "Buzzer initialized on GPIO%d", BUZZER_GPIO);
 }
 
