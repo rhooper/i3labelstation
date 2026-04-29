@@ -12,6 +12,7 @@
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "card_lookup";
 
@@ -29,7 +30,14 @@ static int s_card_count = 0;
 static int s_card_capacity = 0;
 static time_t s_last_refresh = 0;  // unix timestamp of last successful refresh
 
+// Mutex protecting s_cards/s_card_count/s_card_capacity/s_last_refresh.
+// Held only briefly (no I/O inside the lock).
+static SemaphoreHandle_t s_db_mutex = nullptr;
+
 #define STALE_THRESHOLD_SECS (16 * 3600)  // 16 hours
+
+// Maximum HTTP response size per page to prevent OOM from a bad API response
+#define HTTP_BUF_MAX_BYTES (512 * 1024)
 
 static bool add_entry(card_entry_t **cards, int *count, int *capacity,
                       uint32_t card_id, const char *name);
@@ -53,27 +61,35 @@ static void merge_extra_cards() {
 }
 
 void card_lookup_init() {
+    s_db_mutex = xSemaphoreCreateMutex();
     // Load compiled-in extra cards immediately (works before WiFi)
     merge_extra_cards();
     ESP_LOGI(TAG, "Card lookup initialized (%d extra entries)", s_card_count);
 }
 
 int card_lookup_count() {
-    return s_card_count;
+    xSemaphoreTake(s_db_mutex, portMAX_DELAY);
+    int count = s_card_count;
+    xSemaphoreGive(s_db_mutex);
+    return count;
 }
 
 lookup_result_t card_lookup(uint32_t card_id) {
     lookup_result_t result = {};
+    xSemaphoreTake(s_db_mutex, portMAX_DELAY);
     for (int i = 0; i < s_card_count; i++) {
         if (s_cards[i].card_id == card_id) {
             result.found = true;
             strncpy(result.name, s_cards[i].name, LOOKUP_NAME_MAX - 1);
             result.name[LOOKUP_NAME_MAX - 1] = '\0';
-            ESP_LOGI(TAG, "Card 0x%08lX -> %s", (unsigned long)card_id, result.name);
-            return result;
+            break;
         }
     }
-    ESP_LOGW(TAG, "Card 0x%08lX not found", (unsigned long)card_id);
+    xSemaphoreGive(s_db_mutex);
+    if (result.found)
+        ESP_LOGI(TAG, "Card 0x%08lX -> %s", (unsigned long)card_id, result.name);
+    else
+        ESP_LOGW(TAG, "Card 0x%08lX not found", (unsigned long)card_id);
     return result;
 }
 
@@ -90,8 +106,13 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
     http_buf_t *buf = (http_buf_t *)evt->user_data;
     if (evt->event_id == HTTP_EVENT_ON_DATA) {
         size_t needed = buf->len + evt->data_len + 1;
+        if (needed > HTTP_BUF_MAX_BYTES) {
+            ESP_LOGE(TAG, "HTTP response too large (>%u bytes), aborting", HTTP_BUF_MAX_BYTES);
+            return ESP_FAIL;
+        }
         if (needed > buf->capacity) {
             size_t new_cap = needed * 2;
+            if (new_cap > HTTP_BUF_MAX_BYTES) new_cap = HTTP_BUF_MAX_BYTES;
             char *tmp = (char *)realloc(buf->data, new_cap);
             if (!tmp) {
                 ESP_LOGE(TAG, "realloc failed (%d bytes)", (int)new_cap);
@@ -290,14 +311,18 @@ bool card_lookup_refresh() {
     } while (fetched < total);
 
     if (success && new_count > 0) {
-        // Swap in new database
+        // Swap in new database under the lock so readers never see a partial state.
+        // merge_extra_cards() also runs under the lock since it writes s_cards.
+        xSemaphoreTake(s_db_mutex, portMAX_DELAY);
         free(s_cards);
         s_cards = new_cards;
         s_card_count = new_count;
         s_card_capacity = new_capacity;
         merge_extra_cards();
         time(&s_last_refresh);
-        ESP_LOGI(TAG, "Loaded %d card entries (%d from API + extras)", s_card_count, new_count);
+        int final_count = s_card_count;
+        xSemaphoreGive(s_db_mutex);
+        ESP_LOGI(TAG, "Loaded %d card entries (%d from API + extras)", final_count, new_count);
         return true;
     }
 
@@ -308,10 +333,13 @@ bool card_lookup_refresh() {
 }
 
 bool card_lookup_is_stale() {
-    if (s_last_refresh == 0) return false;  // never refreshed yet — handled by count==0
+    xSemaphoreTake(s_db_mutex, portMAX_DELAY);
+    time_t last = s_last_refresh;
+    xSemaphoreGive(s_db_mutex);
+    if (last == 0) return false;  // never refreshed yet — handled by count==0
     time_t now;
     time(&now);
-    return (now - s_last_refresh) > STALE_THRESHOLD_SECS;
+    return (now - last) > STALE_THRESHOLD_SECS;
 }
 
 // Background task: refresh DB at 10:00 and 22:00 daily
