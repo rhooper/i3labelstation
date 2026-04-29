@@ -2,18 +2,16 @@
 #include "usb_host_task.h"
 #include "usb_printer.h"
 #include "brother_ql.h"
-#include "wifi_manager.h"
 #include "label_renderer.h"
 #include "rfid_reader.h"
-#include "status_led.h"
-#include "lcd_display.h"
 #include "card_lookup.h"
 #include "buzzer.h"
+#include "version.h"
 
 #include <cstring>
 #include <cstdio>
-
 #include <ctime>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -21,28 +19,36 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include <Wire.h>
+#include <WiFi.h>
+#include <LiquidCrystal_I2C.h>
+#include <FastLED.h>
+
+#include "secrets.h"
+
 static const char *TAG = "main";
 
-static PrinterState s_printers[MAX_PRINTERS];
+// ---- Hardware objects ----
+static LiquidCrystal_I2C s_lcd(0x27, 16, 2);
+static CRGB s_leds[1];
 
-// Mutex protecting s_printers[] — held during connect/disconnect and printing
+// ---- Printer state ----
+static PrinterState s_printers[MAX_PRINTERS];
 static SemaphoreHandle_t s_printer_mutex = nullptr;
 
-// Print queue carries name to print
+// ---- Print queue ----
 typedef struct {
     char name[LOOKUP_NAME_MAX];
 } print_msg_t;
-
 static QueueHandle_t s_print_queue = nullptr;
 
-// Transient LCD override (e.g. "Printing...", card scan feedback)
-static char s_lcd_override[2][17] = {};  // [line][text], 16 chars + NUL
-static int64_t s_lcd_override_until = 0; // microsecond timestamp
+// ---- LCD override ----
+static char s_lcd_override[2][17] = {};
+static int64_t s_lcd_override_until = 0;
 static portMUX_TYPE s_lcd_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void lcd_override(int line, const char *text, int duration_ms) {
     taskENTER_CRITICAL(&s_lcd_mux);
-    // Clear the other line if the previous override has expired
     int64_t now = esp_timer_get_time();
     if (now >= s_lcd_override_until) {
         s_lcd_override[0][0] = '\0';
@@ -60,7 +66,35 @@ static bool lcd_override_active() {
     return esp_timer_get_time() < s_lcd_override_until;
 }
 
-// Get the best printer: prefer highest USB PID (highest model number) among connected printers.
+// ---- WiFi / NTP helpers ----
+static bool wifi_is_connected() {
+    return WiFi.status() == WL_CONNECTED;
+}
+
+static bool sntp_is_synced() {
+    return time(nullptr) > 1000000000UL;
+}
+
+static bool s_wifi_ever_connected = false;
+
+// ---- LCD helpers ----
+// Write exactly 16 chars to the LCD line, padding short text with spaces.
+// This matches the v1 behaviour of writing to all 16 DDRAM positions so
+// that shorter strings clear any leftover characters from previous content.
+static void lcd_set_line(int line, const char *text) {
+    s_lcd.setCursor(0, line);
+    int len = strlen(text);
+    for (int i = 0; i < 16; i++) {
+        s_lcd.write(i < len ? text[i] : ' ');
+    }
+}
+
+static void lcd_status(const char *line0, const char *line1) {
+    lcd_set_line(0, line0);
+    lcd_set_line(1, line1);
+}
+
+// ---- Printer management ----
 // Caller must hold s_printer_mutex.
 static PrinterState *get_active_printer() {
     PrinterState *best = nullptr;
@@ -73,7 +107,6 @@ static PrinterState *get_active_printer() {
     return best;
 }
 
-// Check if any printer is connected.
 static bool has_active_printer() {
     xSemaphoreTake(s_printer_mutex, portMAX_DELAY);
     bool found = false;
@@ -88,7 +121,6 @@ static void on_printer_event(usb_device_handle_t dev_handle, bool connected, con
     xSemaphoreTake(s_printer_mutex, portMAX_DELAY);
 
     if (connected) {
-        // Find first empty slot
         int slot = -1;
         for (int i = 0; i < MAX_PRINTERS; i++) {
             if (!s_printers[i].connected && s_printers[i].model == nullptr) {
@@ -114,7 +146,6 @@ static void on_printer_event(usb_device_handle_t dev_handle, bool connected, con
             return;
         }
     } else {
-        // Find the printer that disconnected by matching dev_handle — clear in-place
         for (int i = 0; i < MAX_PRINTERS; i++) {
             if (s_printers[i].dev_handle == dev_handle) {
                 ESP_LOGW(TAG, "Printer %d disconnected (%s)", i + 1,
@@ -129,6 +160,7 @@ static void on_printer_event(usb_device_handle_t dev_handle, bool connected, con
     xSemaphoreGive(s_printer_mutex);
 }
 
+// ---- Print task ----
 static void print_task(void *arg) {
     ESP_LOGI(TAG, "Print task started");
     print_msg_t msg;
@@ -137,7 +169,7 @@ static void print_task(void *arg) {
         if (xQueueReceive(s_print_queue, &msg, portMAX_DELAY) != pdTRUE)
             continue;
 
-        // Render first — pure computation, no shared state, can be slow
+        // Render first — pure computation, no shared state
         const uint8_t *fb = label_renderer_render(msg.name);
         if (fb == nullptr) {
             ESP_LOGE(TAG, "Render failed");
@@ -146,8 +178,7 @@ static void print_task(void *arg) {
         }
 
         // Brief lock: get printer pointer and model, then release.
-        // USB I/O runs without the lock so a disconnect callback can't deadlock
-        // waiting for it while we're blocked on a transfer.
+        // USB I/O runs without the lock so a disconnect can't deadlock.
         xSemaphoreTake(s_printer_mutex, portMAX_DELAY);
         PrinterState *printer = get_active_printer();
         const ql_model_t *model = printer ? printer->model : nullptr;
@@ -163,8 +194,6 @@ static void print_task(void *arg) {
         lcd_override(0, "PRINTING...", 5000);
         lcd_override(1, msg.name, 5000);
 
-        // USB I/O without the mutex. printer_send() checks state->connected
-        // internally and will fail cleanly if the printer disconnects mid-print.
         char print_err[17] = {};
         bool ok = brother_ql_print(printer, model, fb, print_err, sizeof(print_err));
 
@@ -177,7 +206,7 @@ static void print_task(void *arg) {
     }
 }
 
-// Dedup: ignore same card ID if scanned within 10s of starting a print
+// ---- Dedup ----
 #define DEDUP_INTERVAL_US (10 * 1000000LL)
 static uint32_t s_last_card_id = 0;
 static int64_t  s_last_print_time = 0;
@@ -188,7 +217,6 @@ static void enqueue_print(uint32_t card_id, const char *name) {
         ESP_LOGI(TAG, "Ignoring duplicate card 0x%08lX (within 10s)", (unsigned long)card_id);
         return;
     }
-
     s_last_card_id = card_id;
     s_last_print_time = now;
 
@@ -198,10 +226,10 @@ static void enqueue_print(uint32_t card_id, const char *name) {
     xQueueSend(s_print_queue, &msg, 0);
 }
 
-// Returns status string for line 1, or NULL if ready (SCAN CARD).
+// ---- LCD update task ----
 static const char *get_status_line() {
-    bool first_boot = !sntp_is_synced() && !wifi_ever_connected();
-    bool first_ntp = wifi_is_connected() && !sntp_is_synced();
+    bool first_boot = !sntp_is_synced() && !s_wifi_ever_connected;
+    bool first_ntp  = wifi_is_connected() && !sntp_is_synced();
     if (first_boot || first_ntp)    return "NETWORKING...";
     if (!wifi_is_connected())       return "ERR: NO WIFI";
     if (!sntp_is_synced())          return "ERR: NO NTP";
@@ -210,7 +238,6 @@ static const char *get_status_line() {
     return nullptr;
 }
 
-// Cycle between SCAN CARD / SCAN FOB every 3 seconds
 #define SCAN_CYCLE_INTERVAL_US (3 * 1000000LL)
 
 static void format_idle_line(char *buf, size_t len, int64_t now) {
@@ -218,7 +245,6 @@ static void format_idle_line(char *buf, size_t len, int64_t now) {
     snprintf(buf, len, "%s", show_fob ? "SCAN FOB" : "SCAN CARD");
 }
 
-// Format clock line for line 2
 static const char *MONTH_ABBR[] = {
     "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
 };
@@ -238,7 +264,6 @@ static void format_clock(char *buf, size_t len) {
              ti.tm_hour, ti.tm_min, ti.tm_sec);
 }
 
-// Easter egg: show "SCAN HAND" for 1 second every 392 seconds
 #define EASTER_EGG_INTERVAL_US (392 * 1000000LL)
 #define EASTER_EGG_DURATION_US (1 * 1000000LL)
 
@@ -255,7 +280,6 @@ static void lcd_update_task(void *arg) {
         bool easter_egg = elapsed < EASTER_EGG_DURATION_US;
 
         if (lcd_override_active()) {
-            // Copy override strings under spinlock, then do I2C outside
             taskENTER_CRITICAL(&s_lcd_mux);
             memcpy(ovr0, s_lcd_override[0], sizeof(ovr0));
             memcpy(ovr1, s_lcd_override[1], sizeof(ovr1));
@@ -288,122 +312,122 @@ static void lcd_update_task(void *arg) {
     }
 }
 
-extern "C" void app_main(void) {
-    ESP_LOGI(TAG, "=== Label Scan Station ===");
+// ---- Arduino entry points ----
+
+static QueueHandle_t s_rfid_queue = nullptr;
+static bool s_cards_loaded = false;
+static int64_t s_btn_press_start = 0;
+static bool s_btn_triggered = false;
+
+void setup() {
+    Serial.begin(115200);
+    ESP_LOGI(TAG, "=== Label Scan Station v%s ===", FIRMWARE_VERSION);
 
     // LED: dim white during init
-    status_led_init();
-    status_led_set(20, 20, 20);
+    FastLED.addLeds<WS2812, RGB_LED_GPIO, GRB>(s_leds, 1);
+    s_leds[0] = CRGB(20, 20, 20);
+    FastLED.show();
 
-    // Initialize LCD display (auto-detects I2C address and pin order)
-    lcd_init();
-    lcd_status("Starting up...", "");
+    // LCD init — must set I2C pins before library init
+    Wire.begin(LCD_SDA_GPIO, LCD_SCL_GPIO);
+    s_lcd.init();
+    s_lcd.backlight();
+    lcd_status("LabelStation v" FIRMWARE_MAJOR_STR, "Starting...");
 
-    // Initialize printer states
+    // Printer states
     for (int i = 0; i < MAX_PRINTERS; i++)
         printer_init(&s_printers[i]);
-
-    // Create printer mutex
     s_printer_mutex = xSemaphoreCreateMutex();
-
-    // Create print queue
     s_print_queue = xQueueCreate(4, sizeof(print_msg_t));
 
-    // Initialize card lookup DB
+    // Card DB (loads extra_cards immediately)
     card_lookup_init();
 
-    // Initialize buzzer
+    // Buzzer
     buzzer_init();
 
-    // Initialize WiFi + SNTP
-    wifi_init();
+    // WiFi + NTP (non-blocking: loop() handles post-connect work)
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
+    tzset();
 
-    // Fetch member list from API (if WiFi connected)
-    if (wifi_is_connected()) {
-        card_lookup_refresh();
-    }
-
-    // Initialize renderer
+    // Renderer
     label_renderer_init();
 
-    // Initialize USB host and set printer callback
+    // USB host
     usb_host_set_printer_callback(on_printer_event);
     usb_host_init();
 
-    // Initialize button GPIO (simple input, no ISR — we poll for long-press)
-    gpio_config_t btn_conf = {};
-    btn_conf.intr_type = GPIO_INTR_DISABLE;
-    btn_conf.mode = GPIO_MODE_INPUT;
-    btn_conf.pin_bit_mask = (1ULL << BUTTON_GPIO);
-    btn_conf.pull_up_en = GPIO_PULLUP_ENABLE;
-    ESP_ERROR_CHECK(gpio_config(&btn_conf));
+    // Button GPIO
+    pinMode(BUTTON_GPIO, INPUT_PULLUP);
 
-    // Initialize RFID reader
-    QueueHandle_t rfid_queue = rfid_init();
+    // RFID
+    s_rfid_queue = rfid_init();
 
-    // Start print task
+    // Tasks
     xTaskCreate(print_task, "print_task", 16384, nullptr, 1, nullptr);
-
-    // Start LCD update task (refreshes clock + status every 500ms)
     xTaskCreate(lcd_update_task, "lcd_update", 2048, nullptr, 1, nullptr);
+    card_lookup_start_refresh_task();
 
     // LED: green when ready
-    status_led_set(0, 20, 0);
+    s_leds[0] = CRGB(0, 20, 0);
+    FastLED.show();
 
-    ESP_LOGI(TAG, "System ready — scan RFID card or press button (1s hold) to test print");
+    ESP_LOGI(TAG, "System ready — scan RFID card or hold button 1s to test print");
+}
 
-    // Main loop: handle RFID scans and button
-    uint32_t card_id;
-    int64_t btn_press_start = 0;
-    bool btn_triggered = false;
-    bool cards_loaded = wifi_is_connected();
+void loop() {
+    int64_t now = esp_timer_get_time();
 
-    while (true) {
-        int64_t now = esp_timer_get_time();
-
-        // Late WiFi connect: fetch card DB if we didn't at boot
-        if (!cards_loaded && wifi_is_connected()) {
-            cards_loaded = true;
-            card_lookup_refresh();
-        }
-
-        // Check RFID queue (non-blocking)
-        if (xQueueReceive(rfid_queue, &card_id, 0) == pdTRUE) {
-            ESP_LOGI(TAG, "RFID card scanned: 0x%08lX", (unsigned long)card_id);
-            lookup_result_t result = card_lookup(card_id);
-
-            if (!result.found) {
-                buzzer_beep_bad();
-                ESP_LOGW(TAG, "Unknown card 0x%08lX", (unsigned long)card_id);
-                lcd_override(0, "ERR:UNKNOWN CARD", 3000);
-            } else if (!has_active_printer()) {
-                buzzer_beep_sad();
-                lcd_override(0, result.name, 3000);
-                lcd_override(1, "NO PRINTER!", 3000);
-                ESP_LOGW(TAG, "Card '%s' OK but no printer", result.name);
-            } else {
-                buzzer_beep_good();
-                lcd_override(0, result.name, 3000);
-                enqueue_print(card_id, result.name);
-            }
-        }
-
-        // Button handling: long press = test print
-        bool btn_down = gpio_get_level(BUTTON_GPIO) == 0;
-        if (btn_down) {
-            if (btn_press_start == 0) {
-                btn_press_start = now;
-            } else if (!btn_triggered && (now - btn_press_start) >= 1000000LL) {
-                btn_triggered = true;
-                ESP_LOGI(TAG, "Button held 1s — test print");
-                lcd_override(0, "Test print...", 3000);
-                enqueue_print(0, "TEST");
-            }
-        } else {
-            btn_press_start = 0;
-            btn_triggered = false;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(10));
+    // Track WiFi ever-connected for status display
+    if (!s_wifi_ever_connected && wifi_is_connected()) {
+        s_wifi_ever_connected = true;
     }
+
+    // Late WiFi connect: fetch card DB if not yet loaded
+    if (!s_cards_loaded && wifi_is_connected()) {
+        s_cards_loaded = true;
+        card_lookup_refresh();
+    }
+
+    // RFID queue (non-blocking)
+    uint32_t card_id;
+    if (xQueueReceive(s_rfid_queue, &card_id, 0) == pdTRUE) {
+        ESP_LOGI(TAG, "RFID card scanned: 0x%08lX", (unsigned long)card_id);
+        lookup_result_t result = card_lookup(card_id);
+
+        if (!result.found) {
+            buzzer_beep_bad();
+            ESP_LOGW(TAG, "Unknown card 0x%08lX", (unsigned long)card_id);
+            lcd_override(0, "ERR:UNKNOWN CARD", 3000);
+        } else if (!has_active_printer()) {
+            buzzer_beep_sad();
+            lcd_override(0, result.name, 3000);
+            lcd_override(1, "NO PRINTER!", 3000);
+            ESP_LOGW(TAG, "Card '%s' OK but no printer", result.name);
+        } else {
+            buzzer_beep_good();
+            lcd_override(0, result.name, 3000);
+            enqueue_print(card_id, result.name);
+        }
+    }
+
+    // Button: long press = test print
+    bool btn_down = digitalRead(BUTTON_GPIO) == LOW;
+    if (btn_down) {
+        if (s_btn_press_start == 0) {
+            s_btn_press_start = now;
+        } else if (!s_btn_triggered && (now - s_btn_press_start) >= 1000000LL) {
+            s_btn_triggered = true;
+            ESP_LOGI(TAG, "Button held 1s — test print");
+            lcd_override(0, "Test print...", 3000);
+            enqueue_print(0, "TEST");
+        }
+    } else {
+        s_btn_press_start = 0;
+        s_btn_triggered = false;
+    }
+
+    delay(10);
 }
