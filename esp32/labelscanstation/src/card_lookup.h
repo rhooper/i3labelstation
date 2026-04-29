@@ -1,9 +1,7 @@
 #pragma once
 
 #include <cstdint>
-
-// Lookup result
-#define LOOKUP_NAME_MAX 64
+#include "app_config.h"  // LOOKUP_NAME_MAX
 
 typedef struct {
     bool found;

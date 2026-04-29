@@ -45,5 +45,8 @@
 // Max printers supported via USB hub
 #define MAX_PRINTERS        3
 
+// Max card holder name length (including NUL)
+#define LOOKUP_NAME_MAX     64
+
 // USB transfer
 #define USB_XFER_SIZE       64

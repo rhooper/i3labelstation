@@ -6,7 +6,6 @@
 #include "stb_truetype.h"
 
 #include "label_renderer.h"
-#include "card_lookup.h"
 #include "app_config.h"
 #include "i3logo.h"
 #include "roboto_bold.h"
