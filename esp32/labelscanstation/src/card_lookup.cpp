@@ -6,20 +6,22 @@
 #include <cstdlib>
 #include <cctype>
 #include <ctime>
+
 #include "esp_log.h"
-#include "esp_http_client.h"
-#include "esp_crt_bundle.h"
-#include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include "esp_crt_bundle.h"
+
 static const char *TAG = "card_lookup";
 
-#define API_URL "https://api-v2.helloclub.com/profiles"
+#define API_URL    "https://api-v2.helloclub.com/profiles"
 #define API_FIELDS "firstName,lastName,customFields"
 
-// Dynamic card database held in heap
 typedef struct {
     uint32_t card_id;
     char name[LOOKUP_NAME_MAX];
@@ -28,24 +30,17 @@ typedef struct {
 static card_entry_t *s_cards = nullptr;
 static int s_card_count = 0;
 static int s_card_capacity = 0;
-static time_t s_last_refresh = 0;  // unix timestamp of last successful refresh
+static time_t s_last_refresh = 0;
 
-// Mutex protecting s_cards/s_card_count/s_card_capacity/s_last_refresh.
-// Held only briefly (no I/O inside the lock).
 static SemaphoreHandle_t s_db_mutex = nullptr;
 
-#define STALE_THRESHOLD_SECS (16 * 3600)  // 16 hours
-
-// Maximum HTTP response size per page to prevent OOM from a bad API response
-#define HTTP_BUF_MAX_BYTES (512 * 1024)
+#define STALE_THRESHOLD_SECS (16 * 3600)
 
 static bool add_entry(card_entry_t **cards, int *count, int *capacity,
                       uint32_t card_id, const char *name);
 
-// Merge compiled-in extra_cards[] into the dynamic DB (skips duplicates)
 static void merge_extra_cards() {
     for (int i = 0; i < EXTRA_CARD_COUNT; i++) {
-        // Check for duplicate
         bool dup = false;
         for (int j = 0; j < s_card_count; j++) {
             if (s_cards[j].card_id == extra_cards[i].card_id) {
@@ -62,7 +57,6 @@ static void merge_extra_cards() {
 
 void card_lookup_init() {
     s_db_mutex = xSemaphoreCreateMutex();
-    // Load compiled-in extra cards immediately (works before WiFi)
     merge_extra_cards();
     ESP_LOGI(TAG, "Card lookup initialized (%d extra entries)", s_card_count);
 }
@@ -93,41 +87,6 @@ lookup_result_t card_lookup(uint32_t card_id) {
     return result;
 }
 
-// --- HTTP fetch + JSON parsing ---
-
-// Dynamic buffer for HTTP response
-typedef struct {
-    char *data;
-    size_t len;
-    size_t capacity;
-} http_buf_t;
-
-static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
-    http_buf_t *buf = (http_buf_t *)evt->user_data;
-    if (evt->event_id == HTTP_EVENT_ON_DATA) {
-        size_t needed = buf->len + evt->data_len + 1;
-        if (needed > HTTP_BUF_MAX_BYTES) {
-            ESP_LOGE(TAG, "HTTP response too large (>%u bytes), aborting", HTTP_BUF_MAX_BYTES);
-            return ESP_FAIL;
-        }
-        if (needed > buf->capacity) {
-            size_t new_cap = needed * 2;
-            if (new_cap > HTTP_BUF_MAX_BYTES) new_cap = HTTP_BUF_MAX_BYTES;
-            char *tmp = (char *)realloc(buf->data, new_cap);
-            if (!tmp) {
-                ESP_LOGE(TAG, "realloc failed (%d bytes)", (int)new_cap);
-                return ESP_FAIL;
-            }
-            buf->data = tmp;
-            buf->capacity = new_cap;
-        }
-        memcpy(buf->data + buf->len, evt->data, evt->data_len);
-        buf->len += evt->data_len;
-        buf->data[buf->len] = '\0';
-    }
-    return ESP_OK;
-}
-
 static bool is_numeric(const char *s) {
     if (!s || !*s) return false;
     for (; *s; s++) {
@@ -136,7 +95,6 @@ static bool is_numeric(const char *s) {
     return true;
 }
 
-// Add one entry to the growing array. Returns false on alloc failure.
 static bool add_entry(card_entry_t **cards, int *count, int *capacity,
                       uint32_t card_id, const char *name) {
     if (*count >= *capacity) {
@@ -157,22 +115,17 @@ static bool add_entry(card_entry_t **cards, int *count, int *capacity,
     return true;
 }
 
-// Process one profile from the JSON response
-static bool process_profile(cJSON *profile, card_entry_t **cards, int *count, int *capacity) {
-    cJSON *first = cJSON_GetObjectItem(profile, "firstName");
-    cJSON *last = cJSON_GetObjectItem(profile, "lastName");
-    cJSON *cf = cJSON_GetObjectItem(profile, "customFields");
-    if (!first || !last || !cf) return true;  // skip, not an error
+static bool process_profile(JsonObject profile, card_entry_t **cards, int *count, int *capacity) {
+    const char *firstName = profile["firstName"] | "";
+    const char *lastName  = profile["lastName"]  | "";
+    if (!firstName[0] && !lastName[0]) return true;
 
-    const char *firstName = cJSON_GetStringValue(first);
-    const char *lastName = cJSON_GetStringValue(last);
-    if (!firstName || !lastName) return true;
+    JsonObject cf = profile["customFields"];
+    if (cf.isNull()) return true;
 
-    cJSON *fob_json = cJSON_GetObjectItem(cf, "fob");
-    const char *fob_str = fob_json ? cJSON_GetStringValue(fob_json) : nullptr;
-    if (!fob_str || !*fob_str) return true;
+    const char *fob_str = cf["fob"] | "";
+    if (!fob_str[0]) return true;
 
-    // Build full name
     char full_name[LOOKUP_NAME_MAX];
     snprintf(full_name, sizeof(full_name), "%s %s", firstName, lastName);
 
@@ -184,7 +137,6 @@ static bool process_profile(cJSON *profile, card_entry_t **cards, int *count, in
     char *saveptr;
     char *tok = strtok_r(fob_buf, ",", &saveptr);
     while (tok) {
-        // Trim whitespace
         while (*tok == ' ') tok++;
         char *end = tok + strlen(tok) - 1;
         while (end > tok && *end == ' ') *end-- = '\0';
@@ -213,106 +165,76 @@ bool card_lookup_refresh() {
     int fetched = 0;
     bool success = true;
 
+    // Create TLS client with ESP-IDF root CA bundle for HTTPS
+    WiFiClientSecure secureClient;
+    secureClient.setCACertBundle(esp_crt_bundle_attach);
+
     do {
-        // Build URL with pagination
         char url[256];
         snprintf(url, sizeof(url),
                  "%s?fields=%s&withCurrentMembership=true&offset=%d",
                  API_URL, API_FIELDS, offset);
 
-        http_buf_t buf = {nullptr, 0, 0};
+        HTTPClient http;
+        http.begin(secureClient, url);
+        http.addHeader("X-Api-Key", HELLOCLUB_API_KEY);
+        http.addHeader("Accept", "application/json");
+        http.addHeader("User-Agent", "MemberLabelPrinter/2.0");
+        http.setTimeout(10000);
 
-        esp_http_client_config_t config = {};
-        config.url = url;
-        config.event_handler = http_event_handler;
-        config.user_data = &buf;
-        config.timeout_ms = 10000;
-        config.crt_bundle_attach = esp_crt_bundle_attach;
-
-        esp_http_client_handle_t client = esp_http_client_init(&config);
-        if (!client) {
-            ESP_LOGE(TAG, "Failed to init HTTP client");
-            success = false;
-            break;
-        }
-
-        // Set auth header
-        char auth_header[128];
-        snprintf(auth_header, sizeof(auth_header), "%s", HELLOCLUB_API_KEY);
-        esp_http_client_set_header(client, "X-Api-Key", auth_header);
-        esp_http_client_set_header(client, "Accept", "application/json");
-        esp_http_client_set_header(client, "User-Agent", "MemberLabelPrinter/1.0");
-
-        esp_err_t err = esp_http_client_perform(client);
-        int status = esp_http_client_get_status_code(client);
-        esp_http_client_cleanup(client);
-
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
-            free(buf.data);
-            success = false;
-            break;
-        }
-
+        int status = http.GET();
         if (status != 200) {
-            ESP_LOGE(TAG, "HTTP status %d", status);
-            free(buf.data);
+            ESP_LOGE(TAG, "HTTP status %d for %s", status, url);
+            http.end();
             success = false;
             break;
         }
 
-        // Parse JSON
-        cJSON *json = cJSON_Parse(buf.data);
-        free(buf.data);
+        // Parse streamed JSON with filter to limit RAM usage
+        JsonDocument filter;
+        filter["meta"]["total"] = true;
+        filter["meta"]["count"] = true;
+        filter["profiles"][0]["firstName"] = true;
+        filter["profiles"][0]["lastName"]  = true;
+        filter["profiles"][0]["customFields"]["fob"] = true;
 
-        if (!json) {
-            ESP_LOGE(TAG, "JSON parse error");
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, http.getStream(),
+                                                   DeserializationOption::Filter(filter));
+        http.end();
+
+        if (err) {
+            ESP_LOGE(TAG, "JSON parse error: %s", err.c_str());
             success = false;
             break;
         }
 
-        cJSON *meta = cJSON_GetObjectItem(json, "meta");
-        cJSON *profiles = cJSON_GetObjectItem(json, "profiles");
-        if (!meta || !profiles) {
-            ESP_LOGE(TAG, "Unexpected JSON structure");
-            cJSON_Delete(json);
+        int page_total = doc["meta"]["total"] | 0;
+        int page_count = doc["meta"]["count"] | 0;
+        if (page_total == 0 || page_count == 0) {
+            ESP_LOGE(TAG, "Unexpected meta: total=%d count=%d", page_total, page_count);
             success = false;
             break;
         }
 
-        cJSON *total_json = cJSON_GetObjectItem(meta, "total");
-        cJSON *count_json = cJSON_GetObjectItem(meta, "count");
-        if (!total_json || !count_json) {
-            ESP_LOGE(TAG, "Missing meta fields");
-            cJSON_Delete(json);
-            success = false;
-            break;
-        }
-
-        total = total_json->valueint;
-        int page_count = count_json->valueint;
+        total = page_total;
         offset += page_count;
         fetched += page_count;
 
         ESP_LOGI(TAG, "Fetched %d/%d profiles", fetched, total);
 
-        cJSON *profile;
-        cJSON_ArrayForEach(profile, profiles) {
+        for (JsonObject profile : doc["profiles"].as<JsonArray>()) {
             if (!process_profile(profile, &new_cards, &new_count, &new_capacity)) {
                 success = false;
                 break;
             }
         }
 
-        cJSON_Delete(json);
-
         if (!success) break;
 
     } while (fetched < total);
 
     if (success && new_count > 0) {
-        // Swap in new database under the lock so readers never see a partial state.
-        // merge_extra_cards() also runs under the lock since it writes s_cards.
         xSemaphoreTake(s_db_mutex, portMAX_DELAY);
         free(s_cards);
         s_cards = new_cards;
@@ -326,7 +248,6 @@ bool card_lookup_refresh() {
         return true;
     }
 
-    // Failure — clean up partial results
     free(new_cards);
     ESP_LOGE(TAG, "API fetch failed, card DB has %d entries", s_card_count);
     return false;
@@ -336,16 +257,14 @@ bool card_lookup_is_stale() {
     xSemaphoreTake(s_db_mutex, portMAX_DELAY);
     time_t last = s_last_refresh;
     xSemaphoreGive(s_db_mutex);
-    if (last == 0) return false;  // never refreshed yet — handled by count==0
+    if (last == 0) return false;
     time_t now;
     time(&now);
     return (now - last) > STALE_THRESHOLD_SECS;
 }
 
-// Background task: refresh DB at 10:00 and 22:00 daily
 static void card_refresh_task(void *arg) {
     while (true) {
-        // Sleep 60s between checks
         vTaskDelay(pdMS_TO_TICKS(60000));
 
         time_t now;
@@ -353,14 +272,11 @@ static void card_refresh_task(void *arg) {
         struct tm ti;
         localtime_r(&now, &ti);
 
-        // Only proceed if time is synced (year > 2020)
         if (ti.tm_year < (2020 - 1900)) continue;
 
-        // Refresh at 10:00 and 22:00 (within the first minute of the hour)
         if ((ti.tm_hour == 10 || ti.tm_hour == 22) && ti.tm_min == 0) {
             ESP_LOGI(TAG, "Scheduled DB refresh at %02d:%02d", ti.tm_hour, ti.tm_min);
             card_lookup_refresh();
-            // Sleep past the trigger minute to avoid re-triggering
             vTaskDelay(pdMS_TO_TICKS(61000));
         }
     }
