@@ -9,18 +9,16 @@
 
 static const char *TAG = "usb_printer";
 
-// Semaphore for synchronous transfers
-static SemaphoreHandle_t s_xfer_done = nullptr;
-static esp_err_t s_xfer_result = ESP_OK;
-static int s_xfer_actual_len = 0;
-
 static void transfer_cb(usb_transfer_t *transfer) {
-    s_xfer_result = (transfer->status == USB_TRANSFER_STATUS_COMPLETED) ? ESP_OK : ESP_FAIL;
-    s_xfer_actual_len = transfer->actual_num_bytes;
+    // Each transfer carries its PrinterState as context so we write to the
+    // correct per-printer fields rather than a shared global.
+    PrinterState *state = (PrinterState *)transfer->context;
+    state->xfer_result = (transfer->status == USB_TRANSFER_STATUS_COMPLETED) ? ESP_OK : ESP_FAIL;
+    state->xfer_actual_len = transfer->actual_num_bytes;
     if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
         ESP_LOGE(TAG, "Transfer failed, status=%d", transfer->status);
     }
-    xSemaphoreGive(s_xfer_done);
+    xSemaphoreGive(state->xfer_done);
 }
 
 // Safely cancel a timed-out transfer: halt + flush + clear the endpoint,
@@ -29,7 +27,7 @@ static void cancel_pending_transfer(PrinterState *state, uint8_t ep_addr) {
     usb_host_endpoint_halt(state->dev_handle, ep_addr);
     usb_host_endpoint_flush(state->dev_handle, ep_addr);
     // Wait for the halted callback to fire so transfer is no longer pending
-    xSemaphoreTake(s_xfer_done, pdMS_TO_TICKS(500));
+    xSemaphoreTake(state->xfer_done, pdMS_TO_TICKS(500));
     usb_host_endpoint_clear(state->dev_handle, ep_addr);
 }
 
@@ -37,10 +35,7 @@ void printer_init(PrinterState *state) {
     memset(state, 0, sizeof(*state));
     state->interface_number = 0xFF;
     state->connected = false;
-
-    if (s_xfer_done == nullptr) {
-        s_xfer_done = xSemaphoreCreateBinary();
-    }
+    state->xfer_done = xSemaphoreCreateBinary();
 }
 
 bool printer_on_connected(PrinterState *state, usb_device_handle_t dev_handle,
@@ -164,6 +159,7 @@ esp_err_t printer_send(PrinterState *state, const uint8_t *data, size_t len) {
     xfer->device_handle = state->dev_handle;
     xfer->bEndpointAddress = state->bulk_out_addr;
     xfer->callback = transfer_cb;
+    xfer->context = state;
     xfer->timeout_ms = 5000;
 
     size_t offset = 0;
@@ -182,16 +178,16 @@ esp_err_t printer_send(PrinterState *state, const uint8_t *data, size_t len) {
         }
 
         // Wait for completion
-        if (xSemaphoreTake(s_xfer_done, pdMS_TO_TICKS(10000)) != pdTRUE) {
+        if (xSemaphoreTake(state->xfer_done, pdMS_TO_TICKS(10000)) != pdTRUE) {
             ESP_LOGE(TAG, "Transfer timeout at offset %zu", offset);
             cancel_pending_transfer(state, state->bulk_out_addr);
             err = ESP_ERR_TIMEOUT;
             break;
         }
 
-        if (s_xfer_result != ESP_OK) {
+        if (state->xfer_result != ESP_OK) {
             ESP_LOGE(TAG, "Transfer error at offset %zu", offset);
-            err = s_xfer_result;
+            err = state->xfer_result;
             break;
         }
 
@@ -217,6 +213,7 @@ int printer_read_status(PrinterState *state, uint8_t *buf, size_t buf_len) {
     xfer->device_handle = state->dev_handle;
     xfer->bEndpointAddress = state->bulk_in_addr;
     xfer->callback = transfer_cb;
+    xfer->context = state;
     xfer->num_bytes = read_size;
     xfer->timeout_ms = 5000;
 
@@ -227,7 +224,7 @@ int printer_read_status(PrinterState *state, uint8_t *buf, size_t buf_len) {
         return -1;
     }
 
-    if (xSemaphoreTake(s_xfer_done, pdMS_TO_TICKS(10000)) != pdTRUE) {
+    if (xSemaphoreTake(state->xfer_done, pdMS_TO_TICKS(10000)) != pdTRUE) {
         ESP_LOGE(TAG, "Read transfer timeout");
         cancel_pending_transfer(state, state->bulk_in_addr);
         usb_host_transfer_free(xfer);
@@ -235,8 +232,8 @@ int printer_read_status(PrinterState *state, uint8_t *buf, size_t buf_len) {
     }
 
     int result = -1;
-    if (s_xfer_result == ESP_OK && s_xfer_actual_len > 0) {
-        size_t copy_len = s_xfer_actual_len < (int)buf_len ? s_xfer_actual_len : buf_len;
+    if (state->xfer_result == ESP_OK && state->xfer_actual_len > 0) {
+        size_t copy_len = state->xfer_actual_len < (int)buf_len ? state->xfer_actual_len : buf_len;
         memcpy(buf, xfer->data_buffer, copy_len);
         result = copy_len;
     }
