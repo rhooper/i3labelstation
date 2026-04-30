@@ -165,7 +165,6 @@ bool card_lookup_refresh() {
     int new_capacity = 0;
     int offset = 0;
     int total = 0;
-    int fetched = 0;
     bool success = true;
 
     // Create TLS client with ESP-IDF root CA bundle for HTTPS
@@ -223,9 +222,8 @@ bool card_lookup_refresh() {
 
         total = page_total;
         offset += page_count;
-        fetched += page_count;
 
-        ESP_LOGI(TAG, "Fetched %d/%d profiles", fetched, total);
+        ESP_LOGI(TAG, "Fetched %d/%d profiles", offset, total);
 
         for (JsonObject profile : doc["profiles"].as<JsonArray>()) {
             if (!process_profile(profile, &new_cards, &new_count, &new_capacity)) {
@@ -236,7 +234,7 @@ bool card_lookup_refresh() {
 
         if (!success) break;
 
-    } while (fetched < total);
+    } while (offset < total);
 
     if (success && new_count > 0) {
         xSemaphoreTake(s_db_mutex, portMAX_DELAY);

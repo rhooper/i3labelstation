@@ -109,10 +109,7 @@ static PrinterState *get_active_printer() {
 
 static bool has_active_printer() {
     xSemaphoreTake(s_printer_mutex, portMAX_DELAY);
-    bool found = false;
-    for (int i = 0; i < MAX_PRINTERS; i++) {
-        if (s_printers[i].connected) { found = true; break; }
-    }
+    bool found = get_active_printer() != nullptr;
     xSemaphoreGive(s_printer_mutex);
     return found;
 }
@@ -295,8 +292,7 @@ static void lcd_update_task(void *arg) {
         } else {
             const char *status = get_status_line();
             if (status) {
-                strncpy(line0, status, sizeof(line0));
-                line0[sizeof(line0) - 1] = '\0';
+                snprintf(line0, sizeof(line0), "%s", status);
             } else if (easter_egg) {
                 snprintf(line0, sizeof(line0), "SCAN HAND");
             } else {

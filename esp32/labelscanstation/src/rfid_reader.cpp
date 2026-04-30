@@ -31,7 +31,7 @@ static void rfid_task(void *arg) {
         // Periodic status log every ~5s (10 * 500ms)
         poll_count++;
         if (poll_count % 10 == 0) {
-            ESP_LOGI(TAG, "RFID poll: buffered=%d, uart_pending=%d", buffered, Serial1.available());
+            ESP_LOGD(TAG, "RFID poll: buffered=%d, uart_pending=%d", buffered, Serial1.available());
         }
 
         // Process all complete 4-byte frames
