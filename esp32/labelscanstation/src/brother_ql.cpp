@@ -82,7 +82,8 @@ static size_t build_init_cmd(uint8_t *buf, size_t buf_size, const ql_model_t *mo
 // Phase 2: mode/media/margins setup (sent after reading status, with detected media type)
 static size_t build_print_setup(uint8_t *buf, size_t buf_size, const ql_model_t *model,
                                 uint8_t media_type, uint8_t media_width_mm,
-                                uint8_t media_length_mm) {
+                                uint8_t media_length_mm, uint32_t raster_lines,
+                                uint16_t feed_margin) {
     size_t pos = 0;
 
     // Mode setting: ESC i M (models that support it)
@@ -114,11 +115,10 @@ static size_t build_print_setup(uint8_t *buf, size_t buf_size, const ql_model_t 
     buf[pos++] = media_width_mm;
     buf[pos++] = media_length_mm;  // 0 for continuous
     // Raster lines LE32
-    uint32_t lines = LABEL_PRINTABLE_H;
-    buf[pos++] = lines & 0xFF;
-    buf[pos++] = (lines >> 8) & 0xFF;
-    buf[pos++] = (lines >> 16) & 0xFF;
-    buf[pos++] = (lines >> 24) & 0xFF;
+    buf[pos++] = raster_lines & 0xFF;
+    buf[pos++] = (raster_lines >> 8) & 0xFF;
+    buf[pos++] = (raster_lines >> 16) & 0xFF;
+    buf[pos++] = (raster_lines >> 24) & 0xFF;
     buf[pos++] = 0x00;  // page
     buf[pos++] = 0x00;  // padding
 
@@ -134,24 +134,29 @@ static size_t build_print_setup(uint8_t *buf, size_t buf_size, const ql_model_t 
     buf[pos++] = CMD_ESC;
     buf[pos++] = CMD_STATUS_INFO;
     buf[pos++] = CMD_MARGINS;
-    buf[pos++] = LABEL_FEED_MARGIN & 0xFF;
-    buf[pos++] = (LABEL_FEED_MARGIN >> 8) & 0xFF;
+    buf[pos++] = feed_margin & 0xFF;
+    buf[pos++] = (feed_margin >> 8) & 0xFF;
 
     configASSERT(pos <= buf_size);
     return pos;
 }
 
 // Build one raster row command into buf. Returns length (3 + bytes_per_row).
-static size_t build_raster_row(uint8_t *buf, const uint8_t *framebuffer, uint16_t y, uint8_t bytes_per_row) {
+// fb_printable_w: number of printable pixels in the framebuffer row
+// fb_stride: bytes per row in the framebuffer
+// right_margin: pixels of right margin to apply in the raster row
+static size_t build_raster_row(uint8_t *buf, const uint8_t *framebuffer, uint16_t y,
+                               uint8_t bytes_per_row, uint16_t fb_printable_w,
+                               uint16_t fb_stride, uint8_t right_margin) {
     uint8_t raster_row[MAX_BYTES_PER_ROW];
     memset(raster_row, 0, bytes_per_row);
 
     uint16_t raster_width_px = bytes_per_row * 8;
-    uint16_t left_offset_px = raster_width_px - LABEL_PRINTABLE_W - LABEL_RIGHT_MARGIN;
+    uint16_t left_offset_px = raster_width_px - fb_printable_w - right_margin;
 
     // Copy framebuffer pixels into raster row at correct offset
-    for (uint16_t x = 0; x < LABEL_PRINTABLE_W; x++) {
-        uint32_t fb_byte = y * LABEL_FB_STRIDE + x / 8;
+    for (uint16_t x = 0; x < fb_printable_w; x++) {
+        uint32_t fb_byte = y * fb_stride + x / 8;
         uint8_t fb_bit = 0x80 >> (x % 8);
         if (framebuffer[fb_byte] & fb_bit) {
             uint16_t raster_x = left_offset_px + x;
@@ -294,14 +299,64 @@ bool brother_ql_disable_auto_off(PrinterState *printer, const ql_model_t *model)
     return true;
 }
 
-bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint8_t *framebuffer,
-                      char *error_msg, size_t error_msg_len) {
+const media_profile_t *brother_ql_query_media(PrinterState *printer, const ql_model_t *model,
+                                               BrotherQLStatus *status_out) {
+    // Send invalidate + init + status request
+    size_t init_len = build_init_cmd(s_cmd_buf, CMD_BUF_SIZE, model);
+    esp_err_t err = printer_send(printer, s_cmd_buf, init_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Media query init send failed: %s", esp_err_to_name(err));
+        return nullptr;
+    }
+
+    // Read status reply
+    uint8_t status_buf[32];
+    vTaskDelay(pdMS_TO_TICKS(200));
+    int n = printer_read_status(printer, status_buf, sizeof(status_buf));
+    if (n <= 0) {
+        ESP_LOGW(TAG, "No status reply from media query (n=%d)", n);
+        return nullptr;
+    }
+
+    log_status_hex(status_buf, n);
+    auto status = brother_ql_parse_status(status_buf, n);
+    if (!status.valid) {
+        ESP_LOGW(TAG, "Invalid status in media query (%d bytes)", n);
+        return nullptr;
+    }
+
+    log_status_detail(status);
+    if (status_out)
+        *status_out = status;
+
+    if (status.media_width == 0) {
+        ESP_LOGW(TAG, "Printer reported media_width=0");
+        return nullptr;
+    }
+
+    const media_profile_t *profile = ql_media_lookup(status.media_width);
+    if (profile) {
+        ESP_LOGI(TAG, "Media query: %dmm %s → %dpx printable, margin=%d",
+                 profile->width_mm, media_type_str(status.media_type),
+                 profile->printable_px, profile->right_margin);
+    } else {
+        ESP_LOGW(TAG, "Unknown media width: %dmm", status.media_width);
+    }
+    return profile;
+}
+
+bool brother_ql_print(PrinterState *printer, const ql_model_t *model,
+                      const uint8_t *framebuffer, uint16_t fb_width, uint16_t fb_height, uint16_t fb_stride,
+                      char *error_msg, size_t error_msg_len,
+                      const media_profile_t **detected_profile_out) {
     if (error_msg && error_msg_len > 0) error_msg[0] = '\0';
+    if (detected_profile_out) *detected_profile_out = nullptr;
 
     ESP_LOGI(TAG, "Printing on %s (heap: %lu bytes)", model->name, (unsigned long)esp_get_free_heap_size());
     ESP_LOGI(TAG, "Model caps: invalidate=%d mode_setting=%d expanded=%d cutting=%d two_color=%d bpr=%d",
              model->num_invalidate, model->mode_setting, model->expanded_mode,
              model->cutting, model->two_color, model->bytes_per_row);
+    ESP_LOGI(TAG, "Framebuffer: %dx%d stride=%d", fb_width, fb_height, fb_stride);
 
     uint8_t bytes_per_row = model->bytes_per_row;
     if (bytes_per_row > MAX_BYTES_PER_ROW) {
@@ -330,6 +385,7 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
     uint8_t media_type = LABEL_MEDIA_TYPE;
     uint8_t media_width = LABEL_WIDTH_MM;
     uint8_t media_length = LABEL_HEIGHT_MM;
+    const media_profile_t *profile = nullptr;
 
     if (n > 0) {
         log_status_hex(status_buf, n);
@@ -352,32 +408,62 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
             if (init_status.media_width > 0) {
                 media_width = init_status.media_width;
                 ESP_LOGI(TAG, "Detected width: %dmm", media_width);
-            }
 
-            // Reject non-29mm media
-            if (init_status.media_width > 0 && init_status.media_width != LABEL_WIDTH_MM) {
-                ESP_LOGE(TAG, "Wrong media width: %dmm (need %dmm)", init_status.media_width, LABEL_WIDTH_MM);
-                set_error(error_msg, error_msg_len, "LOAD 29MM");
-                return false;
+                // Look up media profile — reject unknown widths
+                profile = ql_media_lookup(media_width);
+                if (detected_profile_out) *detected_profile_out = profile;
+                if (!profile) {
+                    ESP_LOGE(TAG, "Unknown media width: %dmm", media_width);
+                    set_error(error_msg, error_msg_len, "BAD MEDIA");
+                    return false;
+                }
+
+                // Check if framebuffer matches detected media
+                if (fb_width != profile->printable_px) {
+                    ESP_LOGW(TAG, "FB width %d != media printable %d — need re-render",
+                             fb_width, profile->printable_px);
+                    set_error(error_msg, error_msg_len, "RERENDER");
+                    return false;
+                }
             }
 
             // For continuous media, length = 0 in the command (raster line count determines length)
             if (media_type == MEDIA_CONTINUOUS) {
                 media_length = 0;
-                ESP_LOGI(TAG, "Continuous media: using length=0, %d raster lines (~%dmm)",
-                         LABEL_PRINTABLE_H, LABEL_HEIGHT_MM);
+                ESP_LOGI(TAG, "Continuous media: using length=0, %d raster lines",
+                         fb_height);
             }
         } else {
             ESP_LOGW(TAG, "Could not parse status (%d bytes)", n);
         }
     } else {
-        ESP_LOGW(TAG, "No status reply (n=%d), using defaults", n);
+        ESP_LOGW(TAG, "No status reply (n=%d), looking up fb_width as fallback", n);
+        // Try to find a media profile matching the framebuffer width (caller knows best)
+        static const uint8_t widths[] = {12, 29, 38, 50, 54, 62};
+        for (size_t wi = 0; wi < sizeof(widths); wi++) {
+            const media_profile_t *p = ql_media_lookup(widths[wi]);
+            if (p && p->printable_px == fb_width) {
+                profile = p;
+                media_width = p->width_mm;
+                media_type = MEDIA_CONTINUOUS;  // assume continuous if we can't detect
+                media_length = 0;
+                ESP_LOGI(TAG, "Matched fb_width %d to %dmm media profile", fb_width, media_width);
+                break;
+            }
+        }
     }
 
+    // Use profile if available, otherwise fall back to app_config defaults
+    uint8_t right_margin = profile ? profile->right_margin : LABEL_RIGHT_MARGIN;
+    uint16_t feed_margin = (media_type == MEDIA_CONTINUOUS)
+        ? (profile ? profile->feed_margin : 35)
+        : LABEL_FEED_MARGIN;
+
     // Phase 2: Send print setup with detected media parameters
-    ESP_LOGI(TAG, "Sending setup: media=%s(0x%02X) width=%d length=%d",
-             media_type_str(media_type), media_type, media_width, media_length);
-    size_t setup_len = build_print_setup(s_cmd_buf, CMD_BUF_SIZE, model, media_type, media_width, media_length);
+    ESP_LOGI(TAG, "Sending setup: media=%s(0x%02X) width=%d length=%d raster_lines=%d feed_margin=%d",
+             media_type_str(media_type), media_type, media_width, media_length, fb_height, feed_margin);
+    size_t setup_len = build_print_setup(s_cmd_buf, CMD_BUF_SIZE, model, media_type, media_width,
+                                         media_length, fb_height, feed_margin);
     ESP_LOGI(TAG, "Sending print setup (%zu bytes)...", setup_len);
     err = printer_send(printer, s_cmd_buf, setup_len);
     if (err != ESP_OK) {
@@ -388,9 +474,11 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
 
     // Send raster data row by row
     uint8_t row_buf[3 + MAX_BYTES_PER_ROW];
-    ESP_LOGI(TAG, "Sending %d raster rows (%d bytes/row)...", LABEL_PRINTABLE_H, bytes_per_row);
-    for (uint16_t y = 0; y < LABEL_PRINTABLE_H; y++) {
-        size_t row_len = build_raster_row(row_buf, framebuffer, y, bytes_per_row);
+    ESP_LOGI(TAG, "Sending %d raster rows (%d bytes/row, %dpx printable, margin=%d)...",
+             fb_height, bytes_per_row, fb_width, right_margin);
+    for (uint16_t y = 0; y < fb_height; y++) {
+        size_t row_len = build_raster_row(row_buf, framebuffer, y, bytes_per_row,
+                                          fb_width, fb_stride, right_margin);
         err = printer_send(printer, row_buf, row_len);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Raster row %d send failed: %s", y, esp_err_to_name(err));
@@ -398,7 +486,7 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
             return false;
         }
         if (y % 200 == 0) {
-            ESP_LOGI(TAG, "  row %d/%d", y, LABEL_PRINTABLE_H);
+            ESP_LOGI(TAG, "  row %d/%d", y, fb_height);
         }
     }
 
@@ -414,16 +502,16 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
 
     ESP_LOGI(TAG, "All data sent, reading completion status...");
 
-    for (int attempts = 0; attempts < 10; attempts++) {
+    for (int attempts = 0; attempts < 20; attempts++) {
         n = printer_read_status(printer, status_buf, sizeof(status_buf));
         if (n < 0) {
             ESP_LOGW(TAG, "Status read failed (attempt %d)", attempts);
-            if (attempts >= 2) {
-                ESP_LOGE(TAG, "Status read failed 3 times, reporting failure");
+            if (attempts >= 5) {
+                ESP_LOGE(TAG, "Status read failed %d times, reporting failure", attempts + 1);
                 set_error(error_msg, error_msg_len, "NO RESPONSE");
                 return false;
             }
-            vTaskDelay(pdMS_TO_TICKS(200));
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
@@ -435,15 +523,6 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
         }
 
         log_status_detail(status);
-
-        // Check media width on any valid status (QL-500 doesn't reply to
-        // the init status request, so this is our first chance to detect
-        // wrong media)
-        if (status.media_width > 0 && status.media_width != LABEL_WIDTH_MM) {
-            ESP_LOGE(TAG, "Wrong media: %dmm (need %dmm)", status.media_width, LABEL_WIDTH_MM);
-            set_error(error_msg, error_msg_len, "WRONG MEDIA");
-            return false;
-        }
 
         if (status.status_type == STATUS_COMPLETE) {
             ESP_LOGI(TAG, "Print completed successfully");
@@ -461,7 +540,7 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
-    ESP_LOGW(TAG, "No completion status after 10 reads");
+    ESP_LOGW(TAG, "No completion status after 20 reads");
     set_error(error_msg, error_msg_len, "NO RESPONSE");
     return false;
 }

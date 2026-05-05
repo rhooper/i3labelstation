@@ -2,6 +2,7 @@
 #include "usb_host_task.h"
 #include "usb_printer.h"
 #include "brother_ql.h"
+#include "ql_models.h"
 #include "wifi_manager.h"
 #include "label_renderer.h"
 #include "rfid_reader.h"
@@ -24,6 +25,8 @@
 static const char *TAG = "main";
 
 static PrinterState s_printers[MAX_PRINTERS];
+static const media_profile_t *s_media_profiles[MAX_PRINTERS] = {};
+static bool s_media_queried[MAX_PRINTERS] = {};
 
 // Mutex protecting s_printers[] — held during connect/disconnect and printing
 static SemaphoreHandle_t s_printer_mutex = nullptr;
@@ -61,15 +64,19 @@ static bool lcd_override_active() {
 }
 
 // Get the best printer: prefer highest USB PID (highest model number) among connected printers.
-// Caller must hold s_printer_mutex.
-static PrinterState *get_active_printer() {
+// Caller must hold s_printer_mutex. Sets *slot_out if non-null.
+static PrinterState *get_active_printer(int *slot_out = nullptr) {
     PrinterState *best = nullptr;
+    int best_slot = -1;
     for (int i = 0; i < MAX_PRINTERS; i++) {
         if (s_printers[i].connected && s_printers[i].model) {
-            if (!best || s_printers[i].model->usb_pid > best->model->usb_pid)
+            if (!best || s_printers[i].model->usb_pid > best->model->usb_pid) {
                 best = &s_printers[i];
+                best_slot = i;
+            }
         }
     }
+    if (slot_out) *slot_out = best_slot;
     return best;
 }
 
@@ -102,12 +109,9 @@ static void on_printer_event(usb_device_handle_t dev_handle, bool connected, con
         }
         s_printers[slot].model = model;
         if (printer_on_connected(&s_printers[slot], dev_handle, usb_host_get_client_handle())) {
-            if (model->mode_setting) {
-                brother_ql_disable_auto_off(&s_printers[slot], model);
-            } else {
-                ESP_LOGI(TAG, "Skipping auto power-off (not supported on %s)", model->name);
-            }
             ESP_LOGI(TAG, "Printer %d ready (%s)", slot + 1, model->name);
+            s_media_profiles[slot] = nullptr;
+            s_media_queried[slot] = false;
         } else {
             ESP_LOGE(TAG, "Printer connection setup failed");
             s_printers[slot].model = nullptr;
@@ -123,6 +127,8 @@ static void on_printer_event(usb_device_handle_t dev_handle, bool connected, con
                          s_printers[i].model ? s_printers[i].model->name : "unknown");
                 printer_on_disconnected(&s_printers[i]);
                 s_printers[i].model = nullptr;
+                s_media_profiles[i] = nullptr;
+                s_media_queried[i] = false;
                 break;
             }
         }
@@ -140,7 +146,8 @@ static void print_task(void *arg) {
             continue;
 
         xSemaphoreTake(s_printer_mutex, portMAX_DELAY);
-        PrinterState *printer = get_active_printer();
+        int slot = -1;
+        PrinterState *printer = get_active_printer(&slot);
         if (!printer) {
             xSemaphoreGive(s_printer_mutex);
             ESP_LOGW(TAG, "Print requested but no printer connected");
@@ -152,7 +159,25 @@ static void print_task(void *arg) {
         lcd_override(0, "PRINTING...", 5000);
         lcd_override(1, msg.name, 5000);
 
-        const uint8_t *fb = label_renderer_render(msg.name);
+        // Query media on first print (deferred from connect callback to avoid USB stack issues)
+        if (slot >= 0 && !s_media_queried[slot]) {
+            s_media_queried[slot] = true;
+            ESP_LOGI(TAG, "Querying media for printer %d...", slot + 1);
+            s_media_profiles[slot] = brother_ql_query_media(printer, printer->model);
+            if (s_media_profiles[slot]) {
+                ESP_LOGI(TAG, "Printer %d media: %dmm (%dpx)", slot + 1,
+                         s_media_profiles[slot]->width_mm, s_media_profiles[slot]->printable_px);
+            } else {
+                ESP_LOGW(TAG, "Printer %d: could not detect media, will use defaults", slot + 1);
+            }
+        }
+
+        // Use detected media profile or fall back to defaults
+        const media_profile_t *profile = (slot >= 0) ? s_media_profiles[slot] : nullptr;
+        uint16_t render_w = profile ? profile->printable_px : LABEL_PRINTABLE_W;
+        uint16_t render_h = LABEL_PRINTABLE_H;
+
+        const uint8_t *fb = label_renderer_render(msg.name, render_w, render_h);
         if (fb == nullptr) {
             xSemaphoreGive(s_printer_mutex);
             ESP_LOGE(TAG, "Render failed");
@@ -160,15 +185,34 @@ static void print_task(void *arg) {
             continue;
         }
 
+        uint16_t fb_stride = label_renderer_stride();
         char print_err[17] = {};
-        bool ok = brother_ql_print(printer, printer->model, fb, print_err, sizeof(print_err));
+        const media_profile_t *detected = nullptr;
+        bool ok = brother_ql_print(printer, printer->model, fb, render_w, render_h, fb_stride,
+                                   print_err, sizeof(print_err), &detected);
+
+        // If print detected different media than we rendered for, re-render and retry once
+        if (!ok && strcmp(print_err, "RERENDER") == 0 && detected) {
+            ESP_LOGI(TAG, "Media mismatch — re-rendering for %dmm (%dpx)",
+                     detected->width_mm, detected->printable_px);
+            if (slot >= 0) s_media_profiles[slot] = detected;
+            render_w = detected->printable_px;
+            fb = label_renderer_render(msg.name, render_w, render_h);
+            if (fb) {
+                fb_stride = label_renderer_stride();
+                print_err[0] = '\0';
+                ok = brother_ql_print(printer, printer->model, fb, render_w, render_h, fb_stride,
+                                      print_err, sizeof(print_err));
+            }
+        }
+
         xSemaphoreGive(s_printer_mutex);
 
         ESP_LOGI(TAG, "Print %s", ok ? "succeeded" : "FAILED");
         if (!ok) {
-            if (strcmp(print_err, "WRONG MEDIA") == 0) {
-                lcd_override(0, "WRONG MEDIA", 10000);
-                lcd_override(1, "LOAD 29MM", 10000);
+            if (strcmp(print_err, "BAD MEDIA") == 0) {
+                lcd_override(0, "BAD MEDIA", 10000);
+                lcd_override(1, "UNKNOWN WIDTH", 10000);
             } else {
                 lcd_override(0, "PRINT FAILED!", 10000);
                 if (print_err[0])
@@ -184,15 +228,6 @@ static uint32_t s_last_card_id = 0;
 static int64_t  s_last_print_time = 0;
 
 static void enqueue_print(uint32_t card_id, const char *name) {
-    int64_t now = esp_timer_get_time();
-    if (card_id == s_last_card_id && (now - s_last_print_time) < DEDUP_INTERVAL_US) {
-        ESP_LOGI(TAG, "Ignoring duplicate card 0x%08lX (within 8s)", (unsigned long)card_id);
-        return;
-    }
-
-    s_last_card_id = card_id;
-    s_last_print_time = now;
-
     print_msg_t msg;
     strncpy(msg.name, name, sizeof(msg.name) - 1);
     msg.name[sizeof(msg.name) - 1] = '\0';
@@ -371,6 +406,15 @@ extern "C" void app_main(void) {
         // Check RFID queue (non-blocking)
         if (xQueueReceive(rfid_queue, &card_id, 0) == pdTRUE) {
             ESP_LOGI(TAG, "RFID card scanned: 0x%08lX", (unsigned long)card_id);
+
+            // Dedup: suppress repeated scans of the same card
+            int64_t now = esp_timer_get_time();
+            if (card_id == s_last_card_id && (now - s_last_print_time) < DEDUP_INTERVAL_US) {
+                ESP_LOGI(TAG, "Ignoring duplicate card 0x%08lX (within %ds)",
+                         (unsigned long)card_id, (int)(DEDUP_INTERVAL_US / 1000000LL));
+                continue;
+            }
+
             lookup_result_t result = card_lookup(card_id);
 
             if (!result.found) {
@@ -387,6 +431,9 @@ extern "C" void app_main(void) {
                 lcd_override(0, result.name, 3000);
                 enqueue_print(card_id, result.name);
             }
+
+            s_last_card_id = card_id;
+            s_last_print_time = esp_timer_get_time();
         }
 
         // Button handling: long press = test print

@@ -22,19 +22,24 @@ static const char *TAG = "label_renderer";
 static uint8_t s_framebuffer[LABEL_FB_SIZE];
 static stbtt_fontinfo s_font;
 static bool s_font_ready = false;
+static uint16_t s_render_width = LABEL_PRINTABLE_W;
+static uint16_t s_render_height = LABEL_PRINTABLE_H;
+static uint16_t s_render_stride = LABEL_FB_STRIDE;
 
-// Font pixel heights (user spec: 15mm name, 8mm date on 29mm wide label)
-// User reported 2x too large, so halve: ~7.5mm name, ~4mm date
-// 306px / 29mm = 10.55 px/mm
-#define NAME_PX_HEIGHT  127  // ~12mm
-#define DATE_PX_HEIGHT  63   // ~6mm
-#define TIME_PX_HEIGHT  42   // ~4mm
+// Font pixel heights for 29mm (306px) reference width
+// Scaled proportionally for other widths
+#define REF_WIDTH       306
+#define NAME_PX_HEIGHT  127  // ~12mm at 306px
+#define DATE_PX_HEIGHT  63   // ~6mm at 306px
+#define TIME_PX_HEIGHT  42   // ~4mm at 306px
+// Narrow labels (< 130px): name only, smaller font
+#define NARROW_NAME_PX  80
 
 // Set a pixel in the 1-bit framebuffer
 static inline void set_pixel(int x, int y) {
-    if (x < 0 || x >= LABEL_PRINTABLE_W || y < 0 || y >= LABEL_PRINTABLE_H)
+    if (x < 0 || x >= s_render_width || y < 0 || y >= s_render_height)
         return;
-    s_framebuffer[y * LABEL_FB_STRIDE + x / 8] |= (0x80 >> (x % 8));
+    s_framebuffer[y * s_render_stride + x / 8] |= (0x80 >> (x % 8));
 }
 
 // Blit an 8-bit grayscale glyph bitmap into the framebuffer, rotated 90° CCW.
@@ -178,50 +183,56 @@ void label_renderer_init() {
         return;
     }
     s_font_ready = true;
-    ESP_LOGI(TAG, "TTF renderer initialized (%dx%d), font loaded", LABEL_PRINTABLE_W, LABEL_PRINTABLE_H);
+    ESP_LOGI(TAG, "TTF renderer initialized, font loaded (max fb %d bytes)", LABEL_FB_SIZE);
 }
 
-const uint8_t *label_renderer_render(const char *name) {
+uint16_t label_renderer_stride() {
+    return s_render_stride;
+}
+
+const uint8_t *label_renderer_render(const char *name, uint16_t width, uint16_t height) {
     if (!s_font_ready) {
         ESP_LOGE(TAG, "Font not initialized");
         return nullptr;
     }
 
-    memset(s_framebuffer, 0, LABEL_FB_SIZE);
+    // Store render dimensions for set_pixel bounds and stride getter
+    s_render_width = width;
+    s_render_height = height;
+    s_render_stride = (width + 7) / 8;
 
-    // Compute font scales from pixel heights
-    float name_scale = stbtt_ScaleForPixelHeight(&s_font, NAME_PX_HEIGHT);
-    float date_scale = stbtt_ScaleForPixelHeight(&s_font, DATE_PX_HEIGHT);
-    float time_scale = stbtt_ScaleForPixelHeight(&s_font, TIME_PX_HEIGHT);
+    size_t fb_size = (size_t)s_render_stride * height;
+    if (fb_size > LABEL_FB_SIZE) {
+        ESP_LOGE(TAG, "Framebuffer too small: need %u, have %d", (unsigned)fb_size, LABEL_FB_SIZE);
+        return nullptr;
+    }
+    memset(s_framebuffer, 0, fb_size);
 
-    // Logo — rotated 90° CCW, 2x scaled, centered across label width
-    // After rotation at 2x: occupies I3LOGO_HEIGHT*2 px in x, I3LOGO_WIDTH*2 px in y
-    int logo_scale = 2;
-    int logo_x = (LABEL_PRINTABLE_W - I3LOGO_HEIGHT * logo_scale) / 2;
-    int logo_y = 20;
-    draw_logo(logo_x, logo_y, logo_scale);
+    ESP_LOGI(TAG, "Rendering %dx%d (stride=%d, %u bytes)", width, height, s_render_stride, (unsigned)fb_size);
 
-    // Text starts after logo
-    int text_y_start = logo_y + I3LOGO_WIDTH * logo_scale + 30;
+    bool narrow = (width < 130);
 
     // Font metrics
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &line_gap);
 
-    // Name — top-aligned, with word wrapping if too long
-    int name_descent_px = (int)(-descent * name_scale + 0.5f);
-    int name_line_height = (int)((ascent - descent) * name_scale + 0.5f);
-    int name_top_margin = 0;
-    int name_fb_x = LABEL_PRINTABLE_W - name_top_margin - name_descent_px;
-    int max_line_width = LABEL_PRINTABLE_H - text_y_start - 20;
+    int text_y_start;
 
-    // Word-wrap: split on spaces, measure words, break lines
-    {
+    if (narrow) {
+        // Narrow label: name only, no logo/date/time
+        text_y_start = 10;
+
+        float name_scale = stbtt_ScaleForPixelHeight(&s_font, NARROW_NAME_PX);
+        int name_descent_px = (int)(-descent * name_scale + 0.5f);
+        int name_line_height = (int)((ascent - descent) * name_scale + 0.5f);
+        int name_fb_x = width - name_descent_px;
+        int max_line_width = height - text_y_start - 10;
+
+        // Word-wrap name
         char name_buf[LOOKUP_NAME_MAX];
         strncpy(name_buf, name, sizeof(name_buf) - 1);
         name_buf[sizeof(name_buf) - 1] = '\0';
 
-        // Collect words
         const char *words[16];
         int word_count = 0;
         char *saveptr;
@@ -236,7 +247,6 @@ const uint8_t *label_renderer_render(const char *name) {
         int line_start = 0;
 
         while (line_start < word_count) {
-            // Build a line by adding words until it overflows
             char line[LOOKUP_NAME_MAX] = {};
             int line_width = 0;
             int line_end = line_start;
@@ -256,46 +266,112 @@ const uint8_t *label_renderer_render(const char *name) {
             }
 
             render_string_rot(line, name_scale, cur_fb_x, text_y_start);
-            cur_fb_x -= name_line_height + 2;  // 2px line gap (reduced)
+            cur_fb_x -= name_line_height + 2;
             line_start = line_end;
         }
-    }
 
-    // Date — bottom-left
-    int date_ascent_px = (int)(ascent * date_scale + 0.5f);
-    int date_bottom_margin = 5;
-    int date_fb_x = date_ascent_px + date_bottom_margin;
-
-    time_t now;
-    time(&now);
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-    char date_str[32];
-    if (timeinfo.tm_year > (2020 - 1900)) {
-        strftime(date_str, sizeof(date_str), "%Y-%m-%d", &timeinfo);
+        ESP_LOGI(TAG, "Narrow label rendered: '%s' (%dpx wide)", name, width);
     } else {
-        snprintf(date_str, sizeof(date_str), "(no time sync)");
-    }
-    render_string_rot(date_str, date_scale, date_fb_x, text_y_start);
+        // Full layout: logo + name + date + time
+        // Scale font sizes proportionally to width
+        float scale_factor = (float)width / REF_WIDTH;
+        float name_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(NAME_PX_HEIGHT * scale_factor));
+        float date_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(DATE_PX_HEIGHT * scale_factor));
+        float time_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(TIME_PX_HEIGHT * scale_factor));
 
-    // Time — bottom-right, smaller font, "HH:MM am" format
-    if (timeinfo.tm_year > (2020 - 1900)) {
-        char time_str[16];
-        int hour12 = timeinfo.tm_hour % 12;
-        if (hour12 == 0) hour12 = 12;
-        const char *ampm = timeinfo.tm_hour < 12 ? "am" : "pm";
-        snprintf(time_str, sizeof(time_str), "%d:%02d %s", hour12, timeinfo.tm_min, ampm);
+        // Logo — rotated 90° CCW, scaled to fit width
+        int logo_scale = (width >= 250) ? 2 : 1;
+        int logo_x = (width - I3LOGO_HEIGHT * logo_scale) / 2;
+        int logo_y = 20;
+        draw_logo(logo_x, logo_y, logo_scale);
 
-        int time_ascent_px = (int)(ascent * time_scale + 0.5f);
-        int time_fb_x = time_ascent_px + date_bottom_margin;
-        int time_width = measure_string(time_str, time_scale);
-        int right_margin = 20;
-        int time_fb_y = LABEL_PRINTABLE_H - time_width - right_margin;
-        render_string_rot(time_str, time_scale, time_fb_x, time_fb_y);
+        text_y_start = logo_y + I3LOGO_WIDTH * logo_scale + 30;
 
-        ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + '%s' + logo", name, date_str, time_str);
-    } else {
-        ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + logo", name, date_str);
+        // Name — top-aligned, with word wrapping
+        int name_descent_px = (int)(-descent * name_scale + 0.5f);
+        int name_line_height = (int)((ascent - descent) * name_scale + 0.5f);
+        int name_fb_x = width - name_descent_px;
+        int max_line_width = height - text_y_start - 20;
+
+        {
+            char name_buf[LOOKUP_NAME_MAX];
+            strncpy(name_buf, name, sizeof(name_buf) - 1);
+            name_buf[sizeof(name_buf) - 1] = '\0';
+
+            const char *words[16];
+            int word_count = 0;
+            char *saveptr;
+            char *tok = strtok_r(name_buf, " ", &saveptr);
+            while (tok && word_count < 16) {
+                words[word_count++] = tok;
+                tok = strtok_r(nullptr, " ", &saveptr);
+            }
+
+            int space_width = measure_string(" ", name_scale);
+            int cur_fb_x = name_fb_x;
+            int line_start = 0;
+
+            while (line_start < word_count) {
+                char line[LOOKUP_NAME_MAX] = {};
+                int line_width = 0;
+                int line_end = line_start;
+
+                for (int i = line_start; i < word_count; i++) {
+                    int w = measure_string(words[i], name_scale);
+                    int trial = (i == line_start) ? w : line_width + space_width + w;
+                    if (trial > max_line_width && i > line_start)
+                        break;
+                    if (i > line_start) {
+                        strcat(line, " ");
+                        line_width += space_width;
+                    }
+                    strcat(line, words[i]);
+                    line_width += w;
+                    line_end = i + 1;
+                }
+
+                render_string_rot(line, name_scale, cur_fb_x, text_y_start);
+                cur_fb_x -= name_line_height + 2;
+                line_start = line_end;
+            }
+        }
+
+        // Date — bottom-left
+        int date_ascent_px = (int)(ascent * date_scale + 0.5f);
+        int date_bottom_margin = 5;
+        int date_fb_x = date_ascent_px + date_bottom_margin;
+
+        time_t now;
+        time(&now);
+        struct tm timeinfo;
+        localtime_r(&now, &timeinfo);
+        char date_str[32];
+        if (timeinfo.tm_year > (2020 - 1900)) {
+            strftime(date_str, sizeof(date_str), "%Y-%m-%d", &timeinfo);
+        } else {
+            snprintf(date_str, sizeof(date_str), "(no time sync)");
+        }
+        render_string_rot(date_str, date_scale, date_fb_x, text_y_start);
+
+        // Time — bottom-right, smaller font
+        if (timeinfo.tm_year > (2020 - 1900)) {
+            char time_str[16];
+            int hour12 = timeinfo.tm_hour % 12;
+            if (hour12 == 0) hour12 = 12;
+            const char *ampm = timeinfo.tm_hour < 12 ? "am" : "pm";
+            snprintf(time_str, sizeof(time_str), "%d:%02d %s", hour12, timeinfo.tm_min, ampm);
+
+            int time_ascent_px = (int)(ascent * time_scale + 0.5f);
+            int time_fb_x = time_ascent_px + date_bottom_margin;
+            int time_width = measure_string(time_str, time_scale);
+            int right_margin = 20;
+            int time_fb_y = height - time_width - right_margin;
+            render_string_rot(time_str, time_scale, time_fb_x, time_fb_y);
+
+            ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + '%s' + logo (%dpx wide)", name, date_str, time_str, width);
+        } else {
+            ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + logo (%dpx wide)", name, date_str, width);
+        }
     }
 
     return s_framebuffer;

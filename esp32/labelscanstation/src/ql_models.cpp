@@ -25,3 +25,21 @@ const ql_model_t *ql_model_lookup(uint16_t pid) {
     }
     return nullptr;
 }
+
+// Media profiles: width_mm, printable_px, right_margin, feed_margin(continuous)
+static const media_profile_t s_media_profiles[] = {
+    { 12, 106, 29, 35 },
+    { 29, 306,  6, 35 },
+    { 38, 413, 12, 35 },
+    { 50, 554, 12, 35 },
+    { 54, 590,  0, 35 },
+    { 62, 696, 12, 35 },
+};
+
+const media_profile_t *ql_media_lookup(uint8_t width_mm) {
+    for (size_t i = 0; i < sizeof(s_media_profiles) / sizeof(s_media_profiles[0]); i++) {
+        if (s_media_profiles[i].width_mm == width_mm)
+            return &s_media_profiles[i];
+    }
+    return nullptr;
+}
