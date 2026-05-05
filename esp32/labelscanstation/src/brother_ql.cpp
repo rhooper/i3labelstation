@@ -436,6 +436,15 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model, const uint
 
         log_status_detail(status);
 
+        // Check media width on any valid status (QL-500 doesn't reply to
+        // the init status request, so this is our first chance to detect
+        // wrong media)
+        if (status.media_width > 0 && status.media_width != LABEL_WIDTH_MM) {
+            ESP_LOGE(TAG, "Wrong media: %dmm (need %dmm)", status.media_width, LABEL_WIDTH_MM);
+            set_error(error_msg, error_msg_len, "WRONG MEDIA");
+            return false;
+        }
+
         if (status.status_type == STATUS_COMPLETE) {
             ESP_LOGI(TAG, "Print completed successfully");
             return true;

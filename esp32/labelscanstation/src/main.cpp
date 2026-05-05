@@ -102,7 +102,11 @@ static void on_printer_event(usb_device_handle_t dev_handle, bool connected, con
         }
         s_printers[slot].model = model;
         if (printer_on_connected(&s_printers[slot], dev_handle, usb_host_get_client_handle())) {
-            brother_ql_disable_auto_off(&s_printers[slot], model);
+            if (model->mode_setting) {
+                brother_ql_disable_auto_off(&s_printers[slot], model);
+            } else {
+                ESP_LOGI(TAG, "Skipping auto power-off (not supported on %s)", model->name);
+            }
             ESP_LOGI(TAG, "Printer %d ready (%s)", slot + 1, model->name);
         } else {
             ESP_LOGE(TAG, "Printer connection setup failed");
@@ -140,7 +144,7 @@ static void print_task(void *arg) {
         if (!printer) {
             xSemaphoreGive(s_printer_mutex);
             ESP_LOGW(TAG, "Print requested but no printer connected");
-            lcd_override(0, "NO PRINTER!", 3000);
+            lcd_override(0, "NO PRINTER!", 4000);
             continue;
         }
 
@@ -152,7 +156,7 @@ static void print_task(void *arg) {
         if (fb == nullptr) {
             xSemaphoreGive(s_printer_mutex);
             ESP_LOGE(TAG, "Render failed");
-            lcd_override(0, "RENDER ERROR", 3000);
+            lcd_override(0, "RENDER ERROR", 4000);
             continue;
         }
 
@@ -162,22 +166,27 @@ static void print_task(void *arg) {
 
         ESP_LOGI(TAG, "Print %s", ok ? "succeeded" : "FAILED");
         if (!ok) {
-            lcd_override(0, "PRINT FAILED!", 10000);
-            if (print_err[0])
-                lcd_override(1, print_err, 10000);
+            if (strcmp(print_err, "WRONG MEDIA") == 0) {
+                lcd_override(0, "WRONG MEDIA", 10000);
+                lcd_override(1, "LOAD 29MM", 10000);
+            } else {
+                lcd_override(0, "PRINT FAILED!", 10000);
+                if (print_err[0])
+                    lcd_override(1, print_err, 10000);
+            }
         }
     }
 }
 
-// Dedup: ignore same card ID if scanned within 10s of starting a print
-#define DEDUP_INTERVAL_US (10 * 1000000LL)
+// Dedup: ignore same card ID if scanned within 8s of starting a print
+#define DEDUP_INTERVAL_US (8 * 1000000LL)
 static uint32_t s_last_card_id = 0;
 static int64_t  s_last_print_time = 0;
 
 static void enqueue_print(uint32_t card_id, const char *name) {
     int64_t now = esp_timer_get_time();
     if (card_id == s_last_card_id && (now - s_last_print_time) < DEDUP_INTERVAL_US) {
-        ESP_LOGI(TAG, "Ignoring duplicate card 0x%08lX (within 10s)", (unsigned long)card_id);
+        ESP_LOGI(TAG, "Ignoring duplicate card 0x%08lX (within 8s)", (unsigned long)card_id);
         return;
     }
 
@@ -367,11 +376,11 @@ extern "C" void app_main(void) {
             if (!result.found) {
                 buzzer_beep_bad();
                 ESP_LOGW(TAG, "Unknown card 0x%08lX", (unsigned long)card_id);
-                lcd_override(0, "ERR:UNKNOWN CARD", 3000);
+                lcd_override(0, "ERR:UNKNOWN CARD", 4000);
             } else if (!has_active_printer()) {
                 buzzer_beep_sad();
-                lcd_override(0, result.name, 3000);
-                lcd_override(1, "NO PRINTER!", 3000);
+                lcd_override(0, result.name, 4000);
+                lcd_override(1, "NO PRINTER!", 4000);
                 ESP_LOGW(TAG, "Card '%s' OK but no printer", result.name);
             } else {
                 buzzer_beep_good();

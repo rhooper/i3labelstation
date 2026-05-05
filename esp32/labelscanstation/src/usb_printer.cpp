@@ -31,6 +31,8 @@ static void cancel_pending_transfer(PrinterState *state, uint8_t ep_addr) {
     // Wait for the halted callback to fire so transfer is no longer pending
     xSemaphoreTake(s_xfer_done, pdMS_TO_TICKS(500));
     usb_host_endpoint_clear(state->dev_handle, ep_addr);
+    // Allow USB stack to fully recycle endpoint state before next transfer
+    vTaskDelay(pdMS_TO_TICKS(50));
 }
 
 void printer_init(PrinterState *state) {
