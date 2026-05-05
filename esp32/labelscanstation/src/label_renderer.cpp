@@ -210,25 +210,31 @@ const uint8_t *label_renderer_render(const char *name, uint16_t width, uint16_t 
 
     ESP_LOGI(TAG, "Rendering %dx%d (stride=%d, %u bytes)", width, height, s_render_stride, (unsigned)fb_size);
 
-    bool narrow = (width < 130);
-
     // Font metrics
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &line_gap);
 
-    int text_y_start;
+    // Scale font sizes proportionally to width
+    float scale_factor = (float)width / REF_WIDTH;
+    float name_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(NAME_PX_HEIGHT * scale_factor));
+    float date_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(DATE_PX_HEIGHT * scale_factor));
+    float time_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(TIME_PX_HEIGHT * scale_factor));
 
-    if (narrow) {
-        // Narrow label: name only, no logo/date/time
-        text_y_start = 10;
+    // Logo — rotated 90° CCW, scaled to fit width
+    int logo_scale = (width >= 250) ? 2 : 1;
+    int logo_x = (width - I3LOGO_HEIGHT * logo_scale) / 2;
+    int logo_y = 20;
+    draw_logo(logo_x, logo_y, logo_scale);
 
-        float name_scale = stbtt_ScaleForPixelHeight(&s_font, NARROW_NAME_PX);
-        int name_descent_px = (int)(-descent * name_scale + 0.5f);
-        int name_line_height = (int)((ascent - descent) * name_scale + 0.5f);
-        int name_fb_x = width - name_descent_px;
-        int max_line_width = height - text_y_start - 10;
+    int text_y_start = logo_y + I3LOGO_WIDTH * logo_scale + 30;
 
-        // Word-wrap name
+    // Name — top-aligned, with word wrapping
+    int name_descent_px = (int)(-descent * name_scale + 0.5f);
+    int name_line_height = (int)((ascent - descent) * name_scale + 0.5f);
+    int name_fb_x = width - name_descent_px;
+    int max_line_width = height - text_y_start - 20;
+
+    {
         char name_buf[LOOKUP_NAME_MAX];
         strncpy(name_buf, name, sizeof(name_buf) - 1);
         name_buf[sizeof(name_buf) - 1] = '\0';
@@ -269,109 +275,43 @@ const uint8_t *label_renderer_render(const char *name, uint16_t width, uint16_t 
             cur_fb_x -= name_line_height + 2;
             line_start = line_end;
         }
+    }
 
-        ESP_LOGI(TAG, "Narrow label rendered: '%s' (%dpx wide)", name, width);
+    // Date — bottom-left
+    int date_ascent_px = (int)(ascent * date_scale + 0.5f);
+    int date_bottom_margin = 5;
+    int date_fb_x = date_ascent_px + date_bottom_margin;
+
+    time_t now;
+    time(&now);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    char date_str[32];
+    if (timeinfo.tm_year > (2020 - 1900)) {
+        strftime(date_str, sizeof(date_str), "%Y-%m-%d", &timeinfo);
     } else {
-        // Full layout: logo + name + date + time
-        // Scale font sizes proportionally to width
-        float scale_factor = (float)width / REF_WIDTH;
-        float name_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(NAME_PX_HEIGHT * scale_factor));
-        float date_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(DATE_PX_HEIGHT * scale_factor));
-        float time_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(TIME_PX_HEIGHT * scale_factor));
+        snprintf(date_str, sizeof(date_str), "(no time sync)");
+    }
+    render_string_rot(date_str, date_scale, date_fb_x, text_y_start);
 
-        // Logo — rotated 90° CCW, scaled to fit width
-        int logo_scale = (width >= 250) ? 2 : 1;
-        int logo_x = (width - I3LOGO_HEIGHT * logo_scale) / 2;
-        int logo_y = 20;
-        draw_logo(logo_x, logo_y, logo_scale);
+    // Time — bottom-right, smaller font
+    if (timeinfo.tm_year > (2020 - 1900)) {
+        char time_str[16];
+        int hour12 = timeinfo.tm_hour % 12;
+        if (hour12 == 0) hour12 = 12;
+        const char *ampm = timeinfo.tm_hour < 12 ? "am" : "pm";
+        snprintf(time_str, sizeof(time_str), "%d:%02d %s", hour12, timeinfo.tm_min, ampm);
 
-        text_y_start = logo_y + I3LOGO_WIDTH * logo_scale + 30;
+        int time_ascent_px = (int)(ascent * time_scale + 0.5f);
+        int time_fb_x = time_ascent_px + date_bottom_margin;
+        int time_width = measure_string(time_str, time_scale);
+        int right_margin = 20;
+        int time_fb_y = height - time_width - right_margin;
+        render_string_rot(time_str, time_scale, time_fb_x, time_fb_y);
 
-        // Name — top-aligned, with word wrapping
-        int name_descent_px = (int)(-descent * name_scale + 0.5f);
-        int name_line_height = (int)((ascent - descent) * name_scale + 0.5f);
-        int name_fb_x = width - name_descent_px;
-        int max_line_width = height - text_y_start - 20;
-
-        {
-            char name_buf[LOOKUP_NAME_MAX];
-            strncpy(name_buf, name, sizeof(name_buf) - 1);
-            name_buf[sizeof(name_buf) - 1] = '\0';
-
-            const char *words[16];
-            int word_count = 0;
-            char *saveptr;
-            char *tok = strtok_r(name_buf, " ", &saveptr);
-            while (tok && word_count < 16) {
-                words[word_count++] = tok;
-                tok = strtok_r(nullptr, " ", &saveptr);
-            }
-
-            int space_width = measure_string(" ", name_scale);
-            int cur_fb_x = name_fb_x;
-            int line_start = 0;
-
-            while (line_start < word_count) {
-                char line[LOOKUP_NAME_MAX] = {};
-                int line_width = 0;
-                int line_end = line_start;
-
-                for (int i = line_start; i < word_count; i++) {
-                    int w = measure_string(words[i], name_scale);
-                    int trial = (i == line_start) ? w : line_width + space_width + w;
-                    if (trial > max_line_width && i > line_start)
-                        break;
-                    if (i > line_start) {
-                        strcat(line, " ");
-                        line_width += space_width;
-                    }
-                    strcat(line, words[i]);
-                    line_width += w;
-                    line_end = i + 1;
-                }
-
-                render_string_rot(line, name_scale, cur_fb_x, text_y_start);
-                cur_fb_x -= name_line_height + 2;
-                line_start = line_end;
-            }
-        }
-
-        // Date — bottom-left
-        int date_ascent_px = (int)(ascent * date_scale + 0.5f);
-        int date_bottom_margin = 5;
-        int date_fb_x = date_ascent_px + date_bottom_margin;
-
-        time_t now;
-        time(&now);
-        struct tm timeinfo;
-        localtime_r(&now, &timeinfo);
-        char date_str[32];
-        if (timeinfo.tm_year > (2020 - 1900)) {
-            strftime(date_str, sizeof(date_str), "%Y-%m-%d", &timeinfo);
-        } else {
-            snprintf(date_str, sizeof(date_str), "(no time sync)");
-        }
-        render_string_rot(date_str, date_scale, date_fb_x, text_y_start);
-
-        // Time — bottom-right, smaller font
-        if (timeinfo.tm_year > (2020 - 1900)) {
-            char time_str[16];
-            int hour12 = timeinfo.tm_hour % 12;
-            if (hour12 == 0) hour12 = 12;
-            const char *ampm = timeinfo.tm_hour < 12 ? "am" : "pm";
-            snprintf(time_str, sizeof(time_str), "%d:%02d %s", hour12, timeinfo.tm_min, ampm);
-
-            int time_ascent_px = (int)(ascent * time_scale + 0.5f);
-            int time_fb_x = time_ascent_px + date_bottom_margin;
-            int time_width = measure_string(time_str, time_scale);
-            int right_margin = 20;
-            int time_fb_y = height - time_width - right_margin;
-            render_string_rot(time_str, time_scale, time_fb_x, time_fb_y);
-
-            ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + '%s' + logo (%dpx wide)", name, date_str, time_str, width);
-        } else {
-            ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + logo (%dpx wide)", name, date_str, width);
-        }
+        ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + '%s' + logo (%dpx wide)", name, date_str, time_str, width);
+    } else {
+        ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + logo (%dpx wide)", name, date_str, width);
     }
 
     return s_framebuffer;

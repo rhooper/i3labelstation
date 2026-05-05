@@ -409,7 +409,6 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model,
                 media_width = init_status.media_width;
                 ESP_LOGI(TAG, "Detected width: %dmm", media_width);
 
-                // Look up media profile — reject unknown widths
                 profile = ql_media_lookup(media_width);
                 if (detected_profile_out) *detected_profile_out = profile;
                 if (!profile) {
@@ -418,7 +417,7 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model,
                     return false;
                 }
 
-                // Check if framebuffer matches detected media
+                // If framebuffer doesn't match detected media, signal re-render needed
                 if (fb_width != profile->printable_px) {
                     ESP_LOGW(TAG, "FB width %d != media printable %d — need re-render",
                              fb_width, profile->printable_px);
@@ -427,29 +426,31 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model,
                 }
             }
 
-            // For continuous media, length = 0 in the command (raster line count determines length)
+            // For continuous media, length = 0 in the command
             if (media_type == MEDIA_CONTINUOUS) {
                 media_length = 0;
-                ESP_LOGI(TAG, "Continuous media: using length=0, %d raster lines",
-                         fb_height);
+                ESP_LOGI(TAG, "Continuous media: using length=0, %d raster lines", fb_height);
             }
         } else {
             ESP_LOGW(TAG, "Could not parse status (%d bytes)", n);
         }
     } else {
-        ESP_LOGW(TAG, "No status reply (n=%d), looking up fb_width as fallback", n);
-        // Try to find a media profile matching the framebuffer width (caller knows best)
+        // No status reply — infer media from fb_width (caller rendered to correct size)
         static const uint8_t widths[] = {12, 29, 38, 50, 54, 62};
         for (size_t wi = 0; wi < sizeof(widths); wi++) {
             const media_profile_t *p = ql_media_lookup(widths[wi]);
             if (p && p->printable_px == fb_width) {
                 profile = p;
                 media_width = p->width_mm;
-                media_type = MEDIA_CONTINUOUS;  // assume continuous if we can't detect
+                media_type = MEDIA_CONTINUOUS;  // continuous is safest assumption
                 media_length = 0;
-                ESP_LOGI(TAG, "Matched fb_width %d to %dmm media profile", fb_width, media_width);
+                ESP_LOGI(TAG, "No status reply — inferred %dmm continuous from fb_width=%d", media_width, fb_width);
                 break;
             }
+        }
+        if (!profile) {
+            ESP_LOGW(TAG, "No status reply (n=%d), using defaults (width=%dmm)", n, LABEL_WIDTH_MM);
+            profile = ql_media_lookup(LABEL_WIDTH_MM);
         }
     }
 

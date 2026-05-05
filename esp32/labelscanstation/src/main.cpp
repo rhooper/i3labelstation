@@ -159,20 +159,17 @@ static void print_task(void *arg) {
         lcd_override(0, "PRINTING...", 5000);
         lcd_override(1, msg.name, 5000);
 
-        // Query media on first print (deferred from connect callback to avoid USB stack issues)
+        // Query media on first print (deferred from connect to avoid USB stack issues)
         if (slot >= 0 && !s_media_queried[slot]) {
             s_media_queried[slot] = true;
-            ESP_LOGI(TAG, "Querying media for printer %d...", slot + 1);
             s_media_profiles[slot] = brother_ql_query_media(printer, printer->model);
             if (s_media_profiles[slot]) {
                 ESP_LOGI(TAG, "Printer %d media: %dmm (%dpx)", slot + 1,
                          s_media_profiles[slot]->width_mm, s_media_profiles[slot]->printable_px);
-            } else {
-                ESP_LOGW(TAG, "Printer %d: could not detect media, will use defaults", slot + 1);
             }
         }
 
-        // Use detected media profile or fall back to defaults
+        // Render at detected media width (or default 29mm)
         const media_profile_t *profile = (slot >= 0) ? s_media_profiles[slot] : nullptr;
         uint16_t render_w = profile ? profile->printable_px : LABEL_PRINTABLE_W;
         uint16_t render_h = LABEL_PRINTABLE_H;
@@ -191,9 +188,9 @@ static void print_task(void *arg) {
         bool ok = brother_ql_print(printer, printer->model, fb, render_w, render_h, fb_stride,
                                    print_err, sizeof(print_err), &detected);
 
-        // If print detected different media than we rendered for, re-render and retry once
-        if (!ok && strcmp(print_err, "RERENDER") == 0 && detected) {
-            ESP_LOGI(TAG, "Media mismatch — re-rendering for %dmm (%dpx)",
+        // If print detected different media, update profile, re-render and retry once
+        if (!ok && detected && detected->printable_px != render_w) {
+            ESP_LOGI(TAG, "Media changed — re-rendering for %dmm (%dpx)",
                      detected->width_mm, detected->printable_px);
             if (slot >= 0) s_media_profiles[slot] = detected;
             render_w = detected->printable_px;
