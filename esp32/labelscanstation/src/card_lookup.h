@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <ctime>
 
 // Lookup result
 #define LOOKUP_NAME_MAX  64
@@ -29,6 +30,9 @@ int card_lookup_count();
 
 // Returns true if the DB hasn't been refreshed in over 16 hours.
 bool card_lookup_is_stale();
+
+// Unix timestamp of the last successful API refresh, or 0 if never.
+time_t card_lookup_last_refresh();
 
 // Look up a card ID and return the associated name.
 lookup_result_t card_lookup(uint32_t card_id);

@@ -13,3 +13,7 @@ bool wifi_ever_connected();
 
 // Returns true if SNTP has synced time at least once.
 bool sntp_is_synced();
+
+// Copy the current IP address into `buf` as a dotted-quad string. If WiFi
+// isn't connected, copies "no link". Always NUL-terminated.
+void wifi_get_ip(char *buf, unsigned len);

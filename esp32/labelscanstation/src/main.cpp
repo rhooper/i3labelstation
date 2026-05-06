@@ -580,15 +580,35 @@ extern "C" void app_main(void) {
             s_last_print_time = esp_timer_get_time();
         }
 
-        // Diagnostic: log Option-button level changes (active-low). No driver
-        // yet — this just confirms the wiring works before we commit to one.
+        // Option button: edge-triggered. In Mode 1, a press shows the
+        // current IP and the last DB-refresh time on the LCD for 5 s.
+        // Other modes: log only (PERMIT increment will go here later).
         static int s_last_option = 1;
         int option_now = gpio_get_level(OPTION_BUTTON_GPIO);
-        if (option_now != s_last_option) {
-            ESP_LOGI(TAG, "Option button (GPIO%d) %s",
-                     OPTION_BUTTON_GPIO, option_now ? "released" : "pressed");
-            s_last_option = option_now;
+        if (s_last_option == 1 && option_now == 0) {
+            int mode = mode_switch_current();
+            if (mode == 1) {
+                char ip_line[17] = {};
+                char db_line[17] = {};
+                wifi_get_ip(ip_line, sizeof(ip_line));
+                time_t t = card_lookup_last_refresh();
+                if (t == 0) {
+                    snprintf(db_line, sizeof(db_line), "DB never");
+                } else {
+                    struct tm ti;
+                    localtime_r(&t, &ti);
+                    snprintf(db_line, sizeof(db_line), "DB %s %d %02d:%02d",
+                             MONTH_ABBR[ti.tm_mon], ti.tm_mday,
+                             ti.tm_hour, ti.tm_min);
+                }
+                lcd_override(0, ip_line, 5000);
+                lcd_override(1, db_line, 5000);
+                ESP_LOGI(TAG, "Option pressed (mode 1): %s / %s", ip_line, db_line);
+            } else {
+                ESP_LOGI(TAG, "Option pressed (mode %d, no action yet)", mode);
+            }
         }
+        s_last_option = option_now;
 
         // Button handling: long press = test print
         bool btn_down = gpio_get_level(BUTTON_GPIO) == 0;

@@ -335,6 +335,10 @@ bool card_lookup_refresh() {
     return false;
 }
 
+time_t card_lookup_last_refresh() {
+    return s_last_refresh;
+}
+
 bool card_lookup_is_stale() {
     if (s_last_refresh == 0) return false;  // never refreshed yet — handled by count==0
     time_t now;

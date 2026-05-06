@@ -26,6 +26,7 @@ static int s_retry_count = 0;
 static std::atomic<bool> s_connected{false};
 static std::atomic<bool> s_ever_connected{false};
 static std::atomic<bool> s_sntp_synced{false};
+static char s_ip_str[16] = {};  // Last assigned IP, dotted-quad string
 static bool s_sntp_initialized = false;
 #define MAX_RETRY 10
 
@@ -57,6 +58,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         auto *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_count = 0;
         s_connected.store(true);
         s_ever_connected.store(true);
@@ -174,6 +176,15 @@ void wifi_init() {
         ESP_LOGI(TAG, "WiFi connected");
     } else {
         ESP_LOGW(TAG, "WiFi connection timeout, will keep retrying in background");
+    }
+}
+
+void wifi_get_ip(char *buf, unsigned len) {
+    if (!buf || len == 0) return;
+    if (s_connected.load() && s_ip_str[0]) {
+        snprintf(buf, len, "%s", s_ip_str);
+    } else {
+        snprintf(buf, len, "no link");
     }
 }
 
