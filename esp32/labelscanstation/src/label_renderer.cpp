@@ -358,8 +358,8 @@ static void render_short(const label_render_req_t *req, int fb_y_start, int fb_y
     int time_line_height = (int)((ascent - descent) * time_scale + 0.5f);
     int time_fb_x = time_ascent_px + date_bottom_margin;
 
-    int left_margin = 10;
-    int right_margin = 20;
+    int left_margin = 5;
+    int right_margin = 10;
     int span = fb_y_end - fb_y_start;
     int max_line_width = span - left_margin - right_margin;
 
