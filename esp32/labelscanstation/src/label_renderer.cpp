@@ -202,10 +202,7 @@ const uint8_t *label_renderer_render(const label_render_req_t *req) {
     const char *name = req->name;
     uint16_t width = req->fb_w;
     uint16_t height = req->fb_h;
-    // mode / email / phone / media_type / media_length_mm consumed in later commits.
-    (void)req->mode;
-    (void)req->email;
-    (void)req->phone;
+    // media_type / media_length_mm consumed in the Mode 2 dispatcher.
     (void)req->media_type;
     (void)req->media_length_mm;
 
@@ -290,10 +287,11 @@ const uint8_t *label_renderer_render(const label_render_req_t *req) {
         }
     }
 
-    // Date — bottom-left
+    // Date — bottom-left, format Mon-D-YYYY (3-letter month, no zero-pad on day).
     int date_ascent_px = (int)(ascent * date_scale + 0.5f);
     int date_bottom_margin = 5;
     int date_fb_x = date_ascent_px + date_bottom_margin;
+    int date_line_height = (int)((ascent - descent) * date_scale + 0.5f);
 
     time_t now;
     time(&now);
@@ -301,13 +299,19 @@ const uint8_t *label_renderer_render(const label_render_req_t *req) {
     localtime_r(&now, &timeinfo);
     char date_str[32];
     if (timeinfo.tm_year > (2020 - 1900)) {
-        strftime(date_str, sizeof(date_str), "%Y-%m-%d", &timeinfo);
+        strftime(date_str, sizeof(date_str), "%b-%-d-%Y", &timeinfo);
     } else {
         snprintf(date_str, sizeof(date_str), "(no time sync)");
     }
     render_string_rot(date_str, date_scale, date_fb_x, text_y_start);
 
-    // Time — bottom-right, smaller font
+    // Mode 1: email line just above the date, same font, same left edge (fb_y).
+    if (req->mode == 1 && req->email && req->email[0]) {
+        int email_fb_x = date_fb_x + date_line_height + 2;
+        render_string_rot(req->email, date_scale, email_fb_x, text_y_start);
+    }
+
+    // Time — bottom-right, smaller font. Phone (Mode 1) sits just above it.
     if (timeinfo.tm_year > (2020 - 1900)) {
         char time_str[16];
         int hour12 = timeinfo.tm_hour % 12;
@@ -317,10 +321,18 @@ const uint8_t *label_renderer_render(const label_render_req_t *req) {
 
         int time_ascent_px = (int)(ascent * time_scale + 0.5f);
         int time_fb_x = time_ascent_px + date_bottom_margin;
+        int time_line_height = (int)((ascent - descent) * time_scale + 0.5f);
         int time_width = measure_string(time_str, time_scale);
         int right_margin = 20;
         int time_fb_y = height - time_width - right_margin;
         render_string_rot(time_str, time_scale, time_fb_x, time_fb_y);
+
+        if (req->mode == 1 && req->phone && req->phone[0]) {
+            int phone_fb_x = time_fb_x + time_line_height + 2;
+            int phone_width = measure_string(req->phone, time_scale);
+            int phone_fb_y = height - phone_width - right_margin;
+            render_string_rot(req->phone, time_scale, phone_fb_x, phone_fb_y);
+        }
 
         ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + '%s' + logo (%dpx wide)", name, date_str, time_str, width);
     } else {
