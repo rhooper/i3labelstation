@@ -43,7 +43,7 @@
 #define BUZZER_GPIO         GPIO_NUM_38
 
 // Option button (normally open, grounded when pressed; use internal pull-up)
-#define OPTION_BUTTON_GPIO  GPIO_NUM_35
+#define OPTION_BUTTON_GPIO  GPIO_NUM_17
 
 // 3-position mode switch (each pin pulled up internally, grounded by switch)
 //   Mode 1: A open,  B open
