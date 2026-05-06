@@ -33,6 +33,12 @@ static time_t s_last_refresh = 0;  // unix timestamp of last successful refresh
 
 #define STALE_THRESHOLD_SECS (16 * 3600)  // 16 hours
 
+// Pre-allocated HTTP receive buffer. Sized to comfortably hold one HelloClub
+// page (the full-fields response is ~18 KB; 32 KB leaves headroom and avoids
+// realloc-grown fragmentation on every refresh).
+#define HTTP_BUF_CAPACITY (32 * 1024)
+static char *s_http_buf = nullptr;
+
 static bool add_entry(card_entry_t **cards, int *count, int *capacity,
                       uint32_t card_id, const char *name,
                       const char *email, const char *phone);
@@ -57,9 +63,20 @@ static void merge_extra_cards() {
 }
 
 void card_lookup_init() {
+    // Pre-allocate the HTTP receive buffer once, before WiFi/lwIP grab their
+    // share of the heap. Reusing this fixed buffer on every refresh stops
+    // realloc-grown fragmentation that previously left the heap with a
+    // largest-free block too small for stb_truetype's 56 KB rasterizer chunk.
+    if (!s_http_buf) {
+        s_http_buf = (char *)malloc(HTTP_BUF_CAPACITY);
+        if (!s_http_buf) {
+            ESP_LOGE(TAG, "Failed to allocate HTTP buffer (%d bytes)", HTTP_BUF_CAPACITY);
+        }
+    }
     // Load compiled-in extra cards immediately (works before WiFi)
     merge_extra_cards();
-    ESP_LOGI(TAG, "Card lookup initialized (%d extra entries)", s_card_count);
+    ESP_LOGI(TAG, "Card lookup initialized (%d extra entries, http_buf=%d bytes)",
+             s_card_count, HTTP_BUF_CAPACITY);
 }
 
 int card_lookup_count() {
@@ -87,9 +104,8 @@ lookup_result_t card_lookup(uint32_t card_id) {
 
 // --- HTTP fetch + JSON parsing ---
 
-// Dynamic buffer for HTTP response
 typedef struct {
-    char *data;
+    char *data;       // Points at s_http_buf
     size_t len;
     size_t capacity;
 } http_buf_t;
@@ -99,14 +115,9 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
     if (evt->event_id == HTTP_EVENT_ON_DATA) {
         size_t needed = buf->len + evt->data_len + 1;
         if (needed > buf->capacity) {
-            size_t new_cap = needed * 2;
-            char *tmp = (char *)realloc(buf->data, new_cap);
-            if (!tmp) {
-                ESP_LOGE(TAG, "realloc failed (%d bytes)", (int)new_cap);
-                return ESP_FAIL;
-            }
-            buf->data = tmp;
-            buf->capacity = new_cap;
+            ESP_LOGE(TAG, "HTTP buffer overflow: need %d, have %d (raise HTTP_BUF_CAPACITY)",
+                     (int)needed, (int)buf->capacity);
+            return ESP_FAIL;
         }
         memcpy(buf->data + buf->len, evt->data, evt->data_len);
         buf->len += evt->data_len;
@@ -221,7 +232,12 @@ bool card_lookup_refresh() {
                  "%s?fields=%s&withCurrentMembership=true&offset=%d",
                  API_URL, API_FIELDS, offset);
 
-        http_buf_t buf = {nullptr, 0, 0};
+        if (!s_http_buf) {
+            ESP_LOGE(TAG, "HTTP buffer not allocated");
+            success = false;
+            break;
+        }
+        http_buf_t buf = {s_http_buf, 0, HTTP_BUF_CAPACITY};
 
         esp_http_client_config_t config = {};
         config.url = url;
@@ -256,21 +272,19 @@ bool card_lookup_refresh() {
 
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
-            free(buf.data);
             success = false;
             break;
         }
 
         if (status != 200) {
             ESP_LOGE(TAG, "HTTP status %d", status);
-            free(buf.data);
             success = false;
             break;
         }
 
-        // Parse JSON
+        // Parse JSON. The receive buffer is the module-static s_http_buf and
+        // is NOT freed — it's reused on every page and every refresh.
         cJSON *json = cJSON_Parse(buf.data);
-        free(buf.data);
 
         if (!json) {
             ESP_LOGE(TAG, "JSON parse error");
