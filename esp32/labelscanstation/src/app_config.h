@@ -42,6 +42,14 @@
 // Buzzer (passive piezo via PWM)
 #define BUZZER_GPIO         GPIO_NUM_38
 
+// Force the firmware to treat loaded media as 29mm continuous tape regardless
+// of what the printer reports. Used because the deployed printer carries
+// generic continuous tape that lacks the Brother spool tag — without an
+// override the printer reports it as die-cut 29x90mm and Mode 2 (SHORT)
+// renders a 2-up stacked layout instead of a single short label.
+// Set to 0 to use the printer's actual media report.
+#define FORCE_MEDIA_CONTINUOUS 1
+
 // Option button (normally open, grounded when pressed; use internal pull-up)
 #define OPTION_BUTTON_GPIO  GPIO_NUM_17
 

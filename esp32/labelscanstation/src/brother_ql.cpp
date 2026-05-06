@@ -405,6 +405,13 @@ bool brother_ql_print(PrinterState *printer, const ql_model_t *model,
                 media_type = init_status.media_type;
                 ESP_LOGI(TAG, "Detected media: %s", media_type_str(media_type));
             }
+#if FORCE_MEDIA_CONTINUOUS
+            if (media_type != MEDIA_CONTINUOUS) {
+                ESP_LOGW(TAG, "FORCE_MEDIA_CONTINUOUS: overriding %s -> continuous",
+                         media_type_str(media_type));
+                media_type = MEDIA_CONTINUOUS;
+            }
+#endif
             if (init_status.media_width > 0) {
                 media_width = init_status.media_width;
                 ESP_LOGI(TAG, "Detected width: %dmm", media_width);

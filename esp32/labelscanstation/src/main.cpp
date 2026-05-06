@@ -183,6 +183,14 @@ static void print_task(void *arg) {
             if (s_media_profiles[slot]) {
                 s_media_type[slot] = status.media_type;
                 s_media_length_mm[slot] = status.media_length;
+#if FORCE_MEDIA_CONTINUOUS
+                if (s_media_type[slot] != MEDIA_TYPE_CONTINUOUS) {
+                    ESP_LOGW(TAG, "FORCE_MEDIA_CONTINUOUS: overriding 0x%02X -> 0x0A",
+                             s_media_type[slot]);
+                    s_media_type[slot] = MEDIA_TYPE_CONTINUOUS;
+                    s_media_length_mm[slot] = 0;
+                }
+#endif
                 ESP_LOGI(TAG, "Printer %d media: %dmm type=0x%02X length=%dmm (%dpx)",
                          slot + 1, s_media_profiles[slot]->width_mm,
                          s_media_type[slot], s_media_length_mm[slot],
