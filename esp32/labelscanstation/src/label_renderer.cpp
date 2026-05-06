@@ -333,20 +333,20 @@ static void render_normal(const label_render_req_t *req) {
     // Logo — rotated 90° CCW, scaled to fit width
     int logo_scale = (width >= 250) ? 2 : 1;
     int logo_x = (width - I3LOGO_HEIGHT * logo_scale) / 2;
-    int logo_y = 20;
+    int logo_y = 5;
     draw_logo(logo_x, logo_y, logo_scale);
 
-    int text_y_start = logo_y + I3LOGO_WIDTH * logo_scale + 30;
+    int text_y_start = logo_y + I3LOGO_WIDTH * logo_scale + 8;
 
     // Name — top-aligned, with word wrapping
     int name_descent_px = (int)(-descent * name_scale + 0.5f);
     int name_fb_x = width - name_descent_px;
-    int max_line_width = height - text_y_start - 20;
+    int max_line_width = height - text_y_start - 5;
     render_wrapped(req->name, name_scale, name_fb_x, text_y_start, max_line_width);
 
     // Date — bottom-left, format Mon-D-YYYY (3-letter month, no zero-pad on day).
     int date_ascent_px = (int)(ascent * date_scale + 0.5f);
-    int date_bottom_margin = 5;
+    int date_bottom_margin = 2;
     int date_fb_x = date_ascent_px + date_bottom_margin;
     int date_line_height = (int)((ascent - descent) * date_scale + 0.5f);
 
@@ -386,7 +386,7 @@ static void render_normal(const label_render_req_t *req) {
         int time_fb_x = time_ascent_px + date_bottom_margin;
         int time_line_height = (int)((ascent - descent) * time_scale + 0.5f);
         int time_width = measure_string(time_str, time_scale);
-        int right_margin = 20;
+        int right_margin = 5;
         int time_fb_y = height - time_width - right_margin;
         render_string_rot(time_str, time_scale, time_fb_x, time_fb_y);
 
@@ -419,14 +419,14 @@ static void render_short(const label_render_req_t *req, int fb_y_start, int fb_y
     int date_descent_px = (int)(-descent * date_scale + 0.5f);
     int date_ascent_px = (int)(ascent * date_scale + 0.5f);
     int date_line_height = (int)((ascent - descent) * date_scale + 0.5f);
-    int date_bottom_margin = 5;
+    int date_bottom_margin = 2;
     int date_fb_x = date_ascent_px + date_bottom_margin;
     int time_ascent_px = (int)(ascent * time_scale + 0.5f);
     int time_line_height = (int)((ascent - descent) * time_scale + 0.5f);
     int time_fb_x = time_ascent_px + date_bottom_margin;
 
-    int left_margin = 5;
-    int right_margin = 10;
+    int left_margin = 2;
+    int right_margin = 5;
     int span = fb_y_end - fb_y_start;
     int max_line_width = span - left_margin - right_margin;
 
@@ -492,17 +492,17 @@ static void render_permit(const label_render_req_t *req) {
     float date_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(DATE_PX_HEIGHT * scale_factor));
 
     // No logo on permits — start text at the left margin.
-    int text_y_start = 20;
+    int text_y_start = 5;
 
     // Name top-aligned, wrapped.
     int name_descent_px = (int)(-descent * name_scale + 0.5f);
     int name_fb_x = width - name_descent_px;
-    int max_line_width = height - text_y_start - 20;
+    int max_line_width = height - text_y_start - 5;
     render_wrapped(req->name, name_scale, name_fb_x, text_y_start, max_line_width);
 
     // "Mon-D-YYYY - Mon-D-YYYY" — today and today+N days.
     int date_ascent_px = (int)(ascent * date_scale + 0.5f);
-    int date_bottom_margin = 5;
+    int date_bottom_margin = 2;
     int date_fb_x = date_ascent_px + date_bottom_margin;
 
     time_t now;
