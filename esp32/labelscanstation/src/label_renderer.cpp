@@ -289,7 +289,13 @@ static void render_normal(const label_render_req_t *req) {
     localtime_r(&now, &timeinfo);
     char date_str[32];
     if (timeinfo.tm_year > (2020 - 1900)) {
-        strftime(date_str, sizeof(date_str), "%b-%-d-%Y", &timeinfo);
+        // Format: "Mon-D-YYYY" e.g. "May-5-2026". Built piecewise because
+        // newlib's strftime doesn't support the GNU/BSD %-d (no-zero-pad)
+        // extension — that produced garbage on-target.
+        char month[8];
+        strftime(month, sizeof(month), "%b", &timeinfo);
+        snprintf(date_str, sizeof(date_str), "%s-%d-%d",
+                 month, timeinfo.tm_mday, timeinfo.tm_year + 1900);
     } else {
         snprintf(date_str, sizeof(date_str), "(no time sync)");
     }
@@ -369,7 +375,13 @@ static void render_short(const label_render_req_t *req, int fb_y_start, int fb_y
     localtime_r(&now, &timeinfo);
     char date_str[32];
     if (timeinfo.tm_year > (2020 - 1900)) {
-        strftime(date_str, sizeof(date_str), "%b-%-d-%Y", &timeinfo);
+        // Format: "Mon-D-YYYY" e.g. "May-5-2026". Built piecewise because
+        // newlib's strftime doesn't support the GNU/BSD %-d (no-zero-pad)
+        // extension — that produced garbage on-target.
+        char month[8];
+        strftime(month, sizeof(month), "%b", &timeinfo);
+        snprintf(date_str, sizeof(date_str), "%s-%d-%d",
+                 month, timeinfo.tm_mday, timeinfo.tm_year + 1900);
     } else {
         snprintf(date_str, sizeof(date_str), "(no time sync)");
     }
