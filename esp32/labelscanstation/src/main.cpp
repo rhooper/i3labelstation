@@ -389,64 +389,6 @@ static void on_mode_change(int new_mode) {
     if (s_lcd_task_handle) xTaskNotifyGive(s_lcd_task_handle);
 }
 
-// =====================================================================
-// Temporary GPIO scanner — find the Option button pin
-// =====================================================================
-// Configures every nominally-free ESP32-S3 GPIO as input + pull-up and
-// logs every level change. Intended to identify which pin the Option
-// button is actually wired to so we can update OPTION_BUTTON_GPIO. Will
-// be removed once we have the answer.
-//
-// Skipped pins (in use or unsafe):
-//   0  boot button     8/9 LCD I2C        18 RFID UART RX
-//   19/20 USB OTG      26-32 SPI flash    36/37 mode switch
-//   38 buzzer PWM      43/44 UART0        48 RGB LED
-//
-// GPIO 35 IS in this list (currently the alleged Option button pin) so
-// we can confirm or refute that.
-
-static const gpio_num_t SCAN_PINS[] = {
-    GPIO_NUM_1,  GPIO_NUM_2,  GPIO_NUM_3,  GPIO_NUM_4,  GPIO_NUM_5,
-    GPIO_NUM_6,  GPIO_NUM_7,  GPIO_NUM_10, GPIO_NUM_11, GPIO_NUM_12,
-    GPIO_NUM_13, GPIO_NUM_14, GPIO_NUM_15, GPIO_NUM_16, GPIO_NUM_17,
-    GPIO_NUM_21, GPIO_NUM_33, GPIO_NUM_34, GPIO_NUM_35, GPIO_NUM_39,
-    GPIO_NUM_40, GPIO_NUM_41, GPIO_NUM_42, GPIO_NUM_45, GPIO_NUM_46,
-    GPIO_NUM_47,
-};
-#define SCAN_PIN_COUNT (sizeof(SCAN_PINS) / sizeof(SCAN_PINS[0]))
-
-static void gpio_scan_task(void *arg) {
-    int last[SCAN_PIN_COUNT];
-
-    for (size_t i = 0; i < SCAN_PIN_COUNT; i++) {
-        gpio_config_t cfg = {};
-        cfg.pin_bit_mask = (1ULL << SCAN_PINS[i]);
-        cfg.mode = GPIO_MODE_INPUT;
-        cfg.pull_up_en = GPIO_PULLUP_ENABLE;
-        cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        cfg.intr_type = GPIO_INTR_DISABLE;
-        gpio_config(&cfg);
-        last[i] = gpio_get_level(SCAN_PINS[i]);
-    }
-
-    // Log initial state so the user can see the baseline before pressing.
-    ESP_LOGI(TAG, "GPIO scanner: monitoring %d pins", (int)SCAN_PIN_COUNT);
-    for (size_t i = 0; i < SCAN_PIN_COUNT; i++) {
-        ESP_LOGI(TAG, "  GPIO%d initial=%d", SCAN_PINS[i], last[i]);
-    }
-
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-        for (size_t i = 0; i < SCAN_PIN_COUNT; i++) {
-            int now = gpio_get_level(SCAN_PINS[i]);
-            if (now != last[i]) {
-                ESP_LOGI(TAG, "Scan GPIO%d: %d -> %d", SCAN_PINS[i], last[i], now);
-                last[i] = now;
-            }
-        }
-    }
-}
-
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "=== Label Scan Station ===");
 
@@ -515,9 +457,6 @@ extern "C" void app_main(void) {
     // Mode-switch polling task. Started after LCD task so the change callback
     // has a valid task handle to notify.
     mode_switch_start_task();
-
-    // Temporary diagnostic: scan unused GPIOs to find the Option button.
-    xTaskCreate(gpio_scan_task, "gpio_scan", 4096, nullptr, 1, nullptr);
 
     // LED: green when ready
     status_led_set(0, 20, 0);

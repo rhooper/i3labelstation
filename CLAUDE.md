@@ -36,7 +36,7 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 | 9 | I2C SCL (LCD) — auto-tries swapped |
 | 18 | RFID UART RX |
 | 19/20 | USB OTG Host |
-| 35 | Option button (normally open, grounded when pressed) |
+| 17 | Option button (normally open, grounded when pressed) |
 | 36 | Mode switch A (gnd in mode 1 only) |
 | 37 | Mode switch B (gnd in mode 3 only) |
 | 38 | Buzzer (passive piezo, PWM) |
