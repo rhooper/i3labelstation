@@ -111,7 +111,7 @@ Driven by the GPIO 36/37 mode switch (`mode_switch.cpp`). Mode is captured at sc
 |------|---------|--------|
 | 1    | NORMAL  | Logo + name + email (above date) + date + phone (above time) + time. Date format `Mon-D-YYYY` (e.g. `May-5-2026`). |
 | 2    | SHORT   | No logo. Name in date-font (wrapped, top-aligned) + date + time + phone. Print quantity is media-aware (see below). |
-| 3    | TODO    | No print — placeholder. Scan is acknowledged with beep + LCD override. |
+| 3    | PERMIT  | Parking-permit label. LCD line 2 shows `Days: N` (default 2). Option button increments N (2 → 3 → 4 → 5 → 1 → 2). On scan, prints a full-length label with name + `<today> - <today + N days>`; N resets to 2. No time-of-day on label or LCD. |
 
 Mode 2 print quantity (`label_renderer_render` dispatcher):
 

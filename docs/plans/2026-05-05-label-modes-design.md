@@ -21,7 +21,7 @@ commit `4b7f763` and are available on every successful card lookup as
 |------|---------|----------|
 | 1 | `NORMAL` | Logo + name + email + date + time + phone, on full 29×90mm |
 | 2 | `SHORT`  | No logo. Name (date-font, wrapped) + date + time + phone. Half-length |
-| 3 | `TODO`   | Placeholder. Card scans accepted but no print enqueued |
+| 3 | `PERMIT` | Parking-permit label. Days selector on LCD line 2 (default 2, increments via Option button 2→3→4→5→1). Prints full-length label with name + "<today> - <today+N days>"; N resets to 2 after each print. |
 
 Switch encoding (each pin pulled up; switched contact pulls to ground):
 

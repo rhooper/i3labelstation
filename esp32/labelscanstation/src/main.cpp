@@ -291,7 +291,7 @@ static const char *mode_label(int m) {
     switch (m) {
         case 1: return "NORMAL";
         case 2: return " SHORT";
-        case 3: return "  TODO";
+        case 3: return "PERMIT";
         default: return "      ";
     }
 }
@@ -524,6 +524,10 @@ extern "C" void app_main(void) {
         // Other modes: log only (PERMIT increment will go here later).
         static int s_last_option = 1;
         int option_now = gpio_get_level(OPTION_BUTTON_GPIO);
+        if (s_last_option != option_now) {
+            ESP_LOGI(TAG, "Option GPIO%d transition: %d -> %d",
+                     OPTION_BUTTON_GPIO, s_last_option, option_now);
+        }
         if (s_last_option == 1 && option_now == 0) {
             int mode = mode_switch_current();
             if (mode == 1) {
