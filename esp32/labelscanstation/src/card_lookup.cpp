@@ -229,6 +229,12 @@ bool card_lookup_refresh() {
         config.user_data = &buf;
         config.timeout_ms = 10000;
         config.crt_bundle_attach = esp_crt_bundle_attach;
+        // Default buffer_size is 512 — too small to hold the response headers
+        // from Cloudflare (NEL/Report-To/CF-Ray/etc. easily exceed that). When
+        // headers overflow, esp_http_client returns ESP_ERR_NOT_SUPPORTED with
+        // a misleading "requires authentication" log line. 4 KB is plenty for
+        // both the headers and the response chunks.
+        config.buffer_size = 4096;
 
         esp_http_client_handle_t client = esp_http_client_init(&config);
         if (!client) {

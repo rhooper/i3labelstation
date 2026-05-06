@@ -10,7 +10,13 @@ import sys
 
 
 def find_paths():
-    """Return (yaml_path, out_path) based on execution context."""
+    """Return (yaml_path, out_path) based on execution context.
+
+    apicreds.yaml is gitignored, so it doesn't exist in git worktrees by
+    default. Walk up from repo_root looking for it — that handles the
+    common case of working in <repo>/.worktrees/<branch>/ while the real
+    file lives in <repo>/.
+    """
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         project_dir = os.path.dirname(script_dir)
@@ -18,10 +24,21 @@ def find_paths():
         project_dir = os.getcwd()
 
     repo_root = os.path.dirname(os.path.dirname(project_dir))
-    return (
-        os.path.join(repo_root, "apicreds.yaml"),
-        os.path.join(project_dir, "src", "secrets.h"),
-    )
+    out_path = os.path.join(project_dir, "src", "secrets.h")
+
+    # Walk up from repo_root looking for apicreds.yaml. Stop at HOME or
+    # filesystem root to avoid wandering into someone else's checkout.
+    home = os.path.expanduser("~")
+    cur = repo_root
+    yaml_path = os.path.join(cur, "apicreds.yaml")
+    while not os.path.exists(yaml_path):
+        parent = os.path.dirname(cur)
+        if parent == cur or cur == home:
+            break
+        cur = parent
+        yaml_path = os.path.join(cur, "apicreds.yaml")
+
+    return (yaml_path, out_path)
 
 
 def parse_yaml_simple(path):
