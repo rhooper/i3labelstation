@@ -38,10 +38,15 @@ static SemaphoreHandle_t s_printer_mutex = nullptr;
 // time so a switch flip during a print doesn't change the in-flight job.
 typedef struct {
     int  mode;
+    int  days;                       // PERMIT only
     char name[LOOKUP_NAME_MAX];
     char email[LOOKUP_EMAIL_MAX];
     char phone[LOOKUP_PHONE_MAX];
 } print_msg_t;
+
+// PERMIT day-count selector. Default 2; cycles 2 -> 3 -> 4 -> 5 -> 1 -> 2
+// via the Option button while in mode 3. Resets to 2 after each enqueue.
+static int s_permit_days = 2;
 
 static QueueHandle_t s_print_queue = nullptr;
 
@@ -190,6 +195,7 @@ static void print_task(void *arg) {
 
         label_render_req_t req = {};
         req.mode = msg.mode;
+        req.days = msg.days;
         req.name = msg.name;
         req.email = msg.email;
         req.phone = msg.phone;
@@ -255,10 +261,11 @@ static void print_task(void *arg) {
 static uint32_t s_last_card_id = 0;
 static int64_t  s_last_print_time = 0;
 
-static void enqueue_print(uint32_t card_id, int mode, const char *name,
+static void enqueue_print(uint32_t card_id, int mode, int days, const char *name,
                           const char *email, const char *phone) {
     print_msg_t msg = {};
     msg.mode = mode;
+    msg.days = days;
     strncpy(msg.name, name, sizeof(msg.name) - 1);
     strncpy(msg.email, email ? email : "", sizeof(msg.email) - 1);
     strncpy(msg.phone, phone ? phone : "", sizeof(msg.phone) - 1);
@@ -371,7 +378,12 @@ static void lcd_update_task(void *arg) {
                 format_idle_line(line0, sizeof(line0), now);
                 append_mode_indicator(line0);
             }
-            format_clock(line1, sizeof(line1));
+            // Mode 3 (PERMIT) replaces the clock line with the days selector.
+            if (mode_switch_current() == 3) {
+                snprintf(line1, sizeof(line1), "Days: %d", s_permit_days);
+            } else {
+                format_clock(line1, sizeof(line1));
+            }
 
             lcd_set_line(0, line0);
             lcd_set_line(1, line1);
@@ -503,15 +515,17 @@ extern "C" void app_main(void) {
                 ESP_LOGW(TAG, "Card '%s' OK but no printer", result.name);
             } else {
                 int mode = mode_switch_current();
+                int days = (mode == 3) ? s_permit_days : 0;
                 buzzer_beep_good();
+                lcd_override(0, result.name, 3000);
+                enqueue_print(card_id, mode, days, result.name,
+                              result.email, result.phone);
                 if (mode == 3) {
-                    // Mode 3 is a placeholder — accept the scan but skip print.
-                    lcd_override(0, "MODE 3: TODO", 2000);
-                    lcd_override(1, result.name, 2000);
-                } else {
-                    lcd_override(0, result.name, 3000);
-                    enqueue_print(card_id, mode, result.name,
-                                  result.email, result.phone);
+                    // Reset the days selector after enqueue. The captured
+                    // value lives on the print message; this just resets the
+                    // visible state for the next scan.
+                    s_permit_days = 2;
+                    if (s_lcd_task_handle) xTaskNotifyGive(s_lcd_task_handle);
                 }
             }
 
@@ -547,8 +561,13 @@ extern "C" void app_main(void) {
                 lcd_override(0, ip_line, 5000);
                 lcd_override(1, db_line, 5000);
                 ESP_LOGI(TAG, "Option pressed (mode 1): %s / %s", ip_line, db_line);
+            } else if (mode == 3) {
+                // PERMIT: cycle days 2 -> 3 -> 4 -> 5 -> 1 -> 2 -> ...
+                s_permit_days = (s_permit_days % 5) + 1;
+                ESP_LOGI(TAG, "Option pressed (PERMIT): days -> %d", s_permit_days);
+                if (s_lcd_task_handle) xTaskNotifyGive(s_lcd_task_handle);
             } else {
-                ESP_LOGI(TAG, "Option pressed (mode %d, no action yet)", mode);
+                ESP_LOGI(TAG, "Option pressed (mode %d, no action)", mode);
             }
         }
         s_last_option = option_now;
@@ -562,7 +581,7 @@ extern "C" void app_main(void) {
                 btn_triggered = true;
                 ESP_LOGI(TAG, "Button held 1s — test print");
                 lcd_override(0, "Test print...", 3000);
-                enqueue_print(0, mode_switch_current(), "TEST", "", "");
+                enqueue_print(0, mode_switch_current(), 0, "TEST", "", "");
             }
         } else {
             btn_press_start = 0;

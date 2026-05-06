@@ -4,7 +4,8 @@
 
 // Render request — populated by the print task and passed to the renderer.
 typedef struct {
-    int mode;                 // 1 = NORMAL, 2 = SHORT (mode 3 never reaches renderer)
+    int mode;                 // 1 = NORMAL, 2 = SHORT, 3 = PERMIT
+    int days;                 // PERMIT only: number of days from today
     const char *name;
     const char *email;        // empty string if not present
     const char *phone;        // empty string if not present
