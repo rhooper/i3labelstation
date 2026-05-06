@@ -25,15 +25,17 @@ commit `4b7f763` and are available on every successful card lookup as
 
 Switch encoding (each pin pulled up; switched contact pulls to ground):
 
-| Mode | A (GPIO 36) | B (GPIO 37) |
-|------|-------------|-------------|
-| 1    | open        | open        |
-| 2    | open        | gnd         |
-| 3    | gnd         | open        |
+Standard SP3T slide. Middle detent floats both pins; left and right detents each ground one pin. Mode numbers follow physical detent order left → middle → right:
 
-(The original spec said position 3 grounds both pins; on-hardware testing
-showed the switch is a standard SP3T where each detent grounds at most one
-pin. `(0, 0)` never appears in practice — treat it as invalid.)
+| Mode | Detent | A (GPIO 36) | B (GPIO 37) |
+|------|--------|-------------|-------------|
+| 1    | left   | gnd         | open        |
+| 2    | middle | open        | open        |
+| 3    | right  | open        | gnd         |
+
+(Original spec was wrong; this layout was found by on-hardware probing of
+the actual switch wiring. `(0, 0)` never appears in practice — treat as
+invalid.)
 
 ## Mode 1 — NORMAL
 
