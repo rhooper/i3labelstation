@@ -3,11 +3,15 @@
 #include <cstdint>
 
 // Lookup result
-#define LOOKUP_NAME_MAX 64
+#define LOOKUP_NAME_MAX  64
+#define LOOKUP_EMAIL_MAX 96
+#define LOOKUP_PHONE_MAX 24
 
 typedef struct {
     bool found;
     char name[LOOKUP_NAME_MAX];
+    char email[LOOKUP_EMAIL_MAX];   // empty string if not present
+    char phone[LOOKUP_PHONE_MAX];   // HelloClub `mobile`, empty if not present
 } lookup_result_t;
 
 // Initialize the card lookup subsystem (empty DB until refresh).

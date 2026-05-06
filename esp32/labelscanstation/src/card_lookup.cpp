@@ -16,12 +16,14 @@
 static const char *TAG = "card_lookup";
 
 #define API_URL "https://api-v2.helloclub.com/profiles"
-#define API_FIELDS "firstName,lastName,customFields"
+#define API_FIELDS "firstName,lastName,email,mobile,customFields"
 
 // Dynamic card database held in heap
 typedef struct {
     uint32_t card_id;
     char name[LOOKUP_NAME_MAX];
+    char email[LOOKUP_EMAIL_MAX];   // empty if HelloClub had no email
+    char phone[LOOKUP_PHONE_MAX];   // empty if HelloClub had no mobile
 } card_entry_t;
 
 static card_entry_t *s_cards = nullptr;
@@ -32,9 +34,11 @@ static time_t s_last_refresh = 0;  // unix timestamp of last successful refresh
 #define STALE_THRESHOLD_SECS (16 * 3600)  // 16 hours
 
 static bool add_entry(card_entry_t **cards, int *count, int *capacity,
-                      uint32_t card_id, const char *name);
+                      uint32_t card_id, const char *name,
+                      const char *email, const char *phone);
 
-// Merge compiled-in extra_cards[] into the dynamic DB (skips duplicates)
+// Merge compiled-in extra_cards[] into the dynamic DB (skips duplicates).
+// Extras have no email/phone — those fields are stored as empty strings.
 static void merge_extra_cards() {
     for (int i = 0; i < EXTRA_CARD_COUNT; i++) {
         // Check for duplicate
@@ -47,7 +51,7 @@ static void merge_extra_cards() {
         }
         if (!dup) {
             add_entry(&s_cards, &s_card_count, &s_card_capacity,
-                      extra_cards[i].card_id, extra_cards[i].name);
+                      extra_cards[i].card_id, extra_cards[i].name, "", "");
         }
     }
 }
@@ -69,6 +73,10 @@ lookup_result_t card_lookup(uint32_t card_id) {
             result.found = true;
             strncpy(result.name, s_cards[i].name, LOOKUP_NAME_MAX - 1);
             result.name[LOOKUP_NAME_MAX - 1] = '\0';
+            strncpy(result.email, s_cards[i].email, LOOKUP_EMAIL_MAX - 1);
+            result.email[LOOKUP_EMAIL_MAX - 1] = '\0';
+            strncpy(result.phone, s_cards[i].phone, LOOKUP_PHONE_MAX - 1);
+            result.phone[LOOKUP_PHONE_MAX - 1] = '\0';
             ESP_LOGI(TAG, "Card 0x%08lX -> %s", (unsigned long)card_id, result.name);
             return result;
         }
@@ -116,8 +124,10 @@ static bool is_numeric(const char *s) {
 }
 
 // Add one entry to the growing array. Returns false on alloc failure.
+// `email` and `phone` may be empty strings but must not be null.
 static bool add_entry(card_entry_t **cards, int *count, int *capacity,
-                      uint32_t card_id, const char *name) {
+                      uint32_t card_id, const char *name,
+                      const char *email, const char *phone) {
     if (*count >= *capacity) {
         int new_cap = *capacity == 0 ? 64 : *capacity * 2;
         card_entry_t *tmp = (card_entry_t *)realloc(*cards, new_cap * sizeof(card_entry_t));
@@ -132,6 +142,10 @@ static bool add_entry(card_entry_t **cards, int *count, int *capacity,
     e->card_id = card_id;
     strncpy(e->name, name, LOOKUP_NAME_MAX - 1);
     e->name[LOOKUP_NAME_MAX - 1] = '\0';
+    strncpy(e->email, email, LOOKUP_EMAIL_MAX - 1);
+    e->email[LOOKUP_EMAIL_MAX - 1] = '\0';
+    strncpy(e->phone, phone, LOOKUP_PHONE_MAX - 1);
+    e->phone[LOOKUP_PHONE_MAX - 1] = '\0';
     (*count)++;
     return true;
 }
@@ -150,6 +164,14 @@ static bool process_profile(cJSON *profile, card_entry_t **cards, int *count, in
     cJSON *fob_json = cJSON_GetObjectItem(cf, "fob");
     const char *fob_str = fob_json ? cJSON_GetStringValue(fob_json) : nullptr;
     if (!fob_str || !*fob_str) return true;
+
+    // Both optional in HelloClub — treat missing as empty string.
+    cJSON *email_json = cJSON_GetObjectItem(profile, "email");
+    cJSON *mobile_json = cJSON_GetObjectItem(profile, "mobile");
+    const char *email = email_json ? cJSON_GetStringValue(email_json) : nullptr;
+    const char *phone = mobile_json ? cJSON_GetStringValue(mobile_json) : nullptr;
+    if (!email) email = "";
+    if (!phone) phone = "";
 
     // Build full name
     char full_name[LOOKUP_NAME_MAX];
@@ -170,7 +192,7 @@ static bool process_profile(cJSON *profile, card_entry_t **cards, int *count, in
 
         if (is_numeric(tok)) {
             uint32_t card_id = (uint32_t)strtoul(tok, nullptr, 10);
-            if (!add_entry(cards, count, capacity, card_id, full_name)) {
+            if (!add_entry(cards, count, capacity, card_id, full_name, email, phone)) {
                 return false;
             }
         } else {
