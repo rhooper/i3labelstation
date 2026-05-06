@@ -1,6 +1,21 @@
 // Label renderer using stb_truetype for smooth TTF font rendering
 // Text is rotated 90° CCW so it reads lengthwise on the 29x90mm label
 
+// stb_truetype's default rasterizer allocates a single ~56 KB chunk per
+// glyph for its active-edge list, plus a points/edges array. Under heap
+// fragmentation (e.g. after the HelloClub DB load) the largest contiguous
+// free block can drop below 56 KB and the rasterizer asserts. Replace
+// stbtt's allocator with a bump arena that lives outside the system heap,
+// so render memory is bounded and never depends on heap state.
+#include <cstddef>
+#include <cstdlib>
+
+extern "C" void *stbtt_arena_alloc(size_t size);
+extern "C" void  stbtt_arena_free(void *p);
+
+#define STBTT_malloc(sz, ud)  ((void)(ud), stbtt_arena_alloc(sz))
+#define STBTT_free(ptr, ud)   ((void)(ud), stbtt_arena_free(ptr))
+
 #define STB_TRUETYPE_IMPLEMENTATION
 #define STBTT_STATIC
 #include "stb_truetype.h"
@@ -26,6 +41,48 @@ static bool s_font_ready = false;
 static uint16_t s_render_width = LABEL_PRINTABLE_W;
 static uint16_t s_render_height = LABEL_PRINTABLE_H;
 static uint16_t s_render_stride = LABEL_FB_STRIDE;
+
+// stb_truetype scratch arena. Sized to fit one glyph's worst-case state:
+//   active-edge chunk: 2000 * sizeof(stbtt__active_edge) ~= 56 KB
+//   points + edges + small temps:                          ~ 4 KB
+// 64 KB gives headroom. Allocated once in label_renderer_init from heap so
+// it doesn't bloat .bss; reset (bump pointer back to 0) before each glyph.
+#define STBTT_ARENA_SIZE (64 * 1024)
+static uint8_t *s_stbtt_arena = nullptr;
+static size_t   s_stbtt_arena_used = 0;
+static size_t   s_stbtt_arena_peak = 0;
+static int      s_stbtt_arena_fallbacks = 0;
+
+extern "C" void *stbtt_arena_alloc(size_t size) {
+    if (!s_stbtt_arena) {
+        // Renderer not initialized yet; fall back to system malloc.
+        s_stbtt_arena_fallbacks++;
+        return malloc(size);
+    }
+    size_t aligned = (size + 7) & ~(size_t)7;
+    if (s_stbtt_arena_used + aligned > STBTT_ARENA_SIZE) {
+        s_stbtt_arena_fallbacks++;
+        return malloc(size);
+    }
+    void *p = s_stbtt_arena + s_stbtt_arena_used;
+    s_stbtt_arena_used += aligned;
+    if (s_stbtt_arena_used > s_stbtt_arena_peak)
+        s_stbtt_arena_peak = s_stbtt_arena_used;
+    return p;
+}
+
+extern "C" void stbtt_arena_free(void *p) {
+    // Pointers inside the arena are released en bloc when the arena is
+    // reset between glyphs — nothing to do here. Pointers outside the arena
+    // came from the malloc fallback above; free them normally.
+    if (!p) return;
+    if (s_stbtt_arena &&
+        (uint8_t *)p >= s_stbtt_arena &&
+        (uint8_t *)p <  s_stbtt_arena + STBTT_ARENA_SIZE) {
+        return;
+    }
+    free(p);
+}
 
 // Font pixel heights for 29mm (306px) reference width
 // Scaled proportionally for other widths
@@ -108,6 +165,9 @@ static int render_string_rot(const char *str, float scale, int fb_x, int fb_y) {
         if (bw > 0 && bh > 0) {
             uint8_t *bitmap = (uint8_t *)malloc(bw * bh);
             if (bitmap) {
+                // Reset the stbtt arena before each glyph: every per-glyph
+                // alloc (active edges, points, edges array) gets recycled.
+                s_stbtt_arena_used = 0;
                 stbtt_MakeCodepointBitmap(&s_font, bitmap, bw, bh, bw, scale, scale, ch);
                 int glyph_x_off = (int)(x_pos + 0.5f) + x0;
                 int glyph_y_off = y0 + (int)(ascent * scale + 0.5f);
@@ -232,13 +292,20 @@ static int render_wrapped(const char *text, float font_scale,
 }
 
 void label_renderer_init() {
+    if (!s_stbtt_arena) {
+        s_stbtt_arena = (uint8_t *)malloc(STBTT_ARENA_SIZE);
+        if (!s_stbtt_arena) {
+            ESP_LOGE(TAG, "Failed to allocate stbtt arena (%d bytes)", STBTT_ARENA_SIZE);
+        }
+    }
     int offset = stbtt_GetFontOffsetForIndex(roboto_bold_ttf, 0);
     if (!stbtt_InitFont(&s_font, roboto_bold_ttf, offset)) {
         ESP_LOGE(TAG, "Failed to init TTF font");
         return;
     }
     s_font_ready = true;
-    ESP_LOGI(TAG, "TTF renderer initialized, font loaded (max fb %d bytes)", LABEL_FB_SIZE);
+    ESP_LOGI(TAG, "TTF renderer initialized (fb %d bytes, stbtt arena %d bytes)",
+             LABEL_FB_SIZE, STBTT_ARENA_SIZE);
 }
 
 uint16_t label_renderer_stride() {
