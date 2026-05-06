@@ -3,7 +3,7 @@
 ## Project Overview
 ESP32-S3 based label printer (Brother QL series) + RFID card reader for i3 Detroit makerspace. Scans member RFID cards, looks up names, and prints name labels.
 
-## Current State (2026-04-11)
+## Current State (2026-05-05)
 Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approach abandoned.
 
 ### What Works
@@ -11,10 +11,11 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 - Card lookup from compiled-in database (`cards.tsv` → `card_db.h`)
 - Brother QL USB printing with multi-model support (hotplug detection)
 - Supported models: QL-500, QL-550, QL-560, QL-570, QL-580N, QL-650TD, QL-700, QL-710W, QL-720NW, QL-800, QL-810W, QL-820NWB
-- Up to 3 printers via USB hub, selected by mode switch (GPIO36/37)
+- Up to 3 printers via USB hub (best printer auto-selected by highest USB PID)
 - 16x2 HD44780 LCD status display with clock (America/Detroit timezone, auto DST)
 - Buzzer feedback: good beep (C7), bad buzz (C4→A♭4), sad beep (C5→G4→E4 when no printer)
 - WiFi + SNTP with nightly resync at random time (midnight–5AM)
+- 3-position label-mode switch on GPIO 36/37 (NORMAL / SHORT / TODO) — see "Label Modes" below
 
 ### What's Left
 1. **Boot-time printer detection**: Printer connected before boot isn't detected (hotplug works)
@@ -96,15 +97,35 @@ while True:
 | `mode_switch.*` | 3-state mode switch on GPIO36/37 |
 
 ### LCD Display (16×2)
-- Ready: `SCAN CARD` / `Apr 11  20:41:45`
-- Errors (precedence): `NETWORKING...` → `ERR: NO WIFI` → `ERR: NO NTP` → `ERR: NO PRINTER`
+- Ready: `SCAN CARD <MODE>` / `May  5  20:41:45` — line 0 cycles `SCAN CARD` / `SCAN FOB` every 3s; the right-hand 6 chars hold the current label mode (`NORMAL`, ` SHORT`, `  TODO`).
+- Errors (precedence): `NETWORKING...` → `ERR: NO WIFI` → `ERR: NO NTP` → `ERR: MEMBERDB` → `ERR: NO PRINTER` (no mode indicator on error lines)
 - Card scan: shows name (3s) or `ERR:UNKNOWN CARD`
+- Mode 3 scan: `MODE 3: TODO` / member-name (2s), no print
 - Easter egg: "SCAN HAND" (1s every 392s)
 
-### Label Layout (29×90mm die-cut, rotated 90° CCW)
-- i3 logo (2× scaled) at top
-- Name in large text (111px, ~10.5mm) near top
-- Date in medium text (63px, ~6mm) bottom-aligned, left-justified
+### Label Modes
+
+Driven by the GPIO 36/37 mode switch (`mode_switch.cpp`). Mode is captured at scan time so a switch flip during a print does not change the in-flight job.
+
+| Mode | LCD     | Layout |
+|------|---------|--------|
+| 1    | NORMAL  | Logo + name + email (above date) + date + phone (above time) + time. Date format `Mon-D-YYYY` (e.g. `May-5-2026`). |
+| 2    | SHORT   | No logo. Name in date-font (wrapped, top-aligned) + date + time + phone. Print quantity is media-aware (see below). |
+| 3    | TODO    | No print — placeholder. Scan is acknowledged with beep + LCD override. |
+
+Mode 2 print quantity (`label_renderer_render` dispatcher):
+
+- Continuous tape: one short layout, ~45 mm of feed (`req.fb_h = render_h / 2` in `main.cpp`).
+- Die-cut ≥ 90mm: two stacked short layouts on a single piece, with a dotted cut guide at the midpoint.
+- Die-cut < 90mm: one short layout filling the piece.
+
+Switch encoding (each pin pulled up internally; switch contact pulls to ground):
+
+| Mode | A (GPIO 36) | B (GPIO 37) |
+|------|-------------|-------------|
+| 1    | open        | open        |
+| 2    | open        | gnd         |
+| 3    | gnd         | gnd         |
 
 ### Card Database
 - Source: `cards.tsv` (decimal ID + tab + name)
