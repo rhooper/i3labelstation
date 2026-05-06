@@ -427,12 +427,10 @@ static void on_db_progress(int fetched, int total) {
     }
 }
 
-// =====================================================================
-// Temporary GPIO scanner — confirm the Option button pin
-// =====================================================================
-// First pass identified GPIO 17, but the button isn't responding. Re-run
-// the scanner so the user can press the button and we can see which pin
-// actually fires this time.
+#if 0
+// Temporary GPIO scanner — kept commented for future debugging. Used to
+// identify GPIO 17 as the Option button pin. Re-enable + spawn the task
+// from app_main if a similar discovery is needed again.
 static const gpio_num_t SCAN_PINS[] = {
     GPIO_NUM_1,  GPIO_NUM_2,  GPIO_NUM_3,  GPIO_NUM_4,  GPIO_NUM_5,
     GPIO_NUM_6,  GPIO_NUM_7,  GPIO_NUM_10, GPIO_NUM_11, GPIO_NUM_12,
@@ -473,6 +471,7 @@ static void gpio_scan_task(void *arg) {
         }
     }
 }
+#endif
 
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "=== Label Scan Station ===");
@@ -544,10 +543,6 @@ extern "C" void app_main(void) {
     // has a valid task handle to notify.
     mode_switch_start_task();
 
-    // Re-enable the GPIO scanner: GPIO 17 isn't responding to the Option
-    // button; figure out the real pin by watching every nominally-free GPIO
-    // change. Remove this task once we've identified the right pin.
-    xTaskCreate(gpio_scan_task, "gpio_scan", 4096, nullptr, 1, nullptr);
 
     // LED: green when ready
     status_led_set(0, 20, 0);
