@@ -27,14 +27,20 @@ static const char *TAG = "main";
 
 static PrinterState s_printers[MAX_PRINTERS];
 static const media_profile_t *s_media_profiles[MAX_PRINTERS] = {};
+static uint8_t s_media_type[MAX_PRINTERS] = {};      // 0x0A=continuous, 0x0B=die-cut
+static uint8_t s_media_length_mm[MAX_PRINTERS] = {}; // 0 for continuous
 static bool s_media_queried[MAX_PRINTERS] = {};
 
 // Mutex protecting s_printers[] — held during connect/disconnect and printing
 static SemaphoreHandle_t s_printer_mutex = nullptr;
 
-// Print queue carries name to print
+// Print queue carries the data the renderer needs. Mode is captured at scan
+// time so a switch flip during a print doesn't change the in-flight job.
 typedef struct {
+    int  mode;
     char name[LOOKUP_NAME_MAX];
+    char email[LOOKUP_EMAIL_MAX];
+    char phone[LOOKUP_PHONE_MAX];
 } print_msg_t;
 
 static QueueHandle_t s_print_queue = nullptr;
@@ -160,13 +166,20 @@ static void print_task(void *arg) {
         lcd_override(0, "PRINTING...", 5000);
         lcd_override(1, msg.name, 5000);
 
-        // Query media on first print (deferred from connect to avoid USB stack issues)
+        // Query media on first print (deferred from connect to avoid USB stack issues).
+        // Capture both the cached profile and the loaded-media type/length so the
+        // renderer can branch on continuous vs. die-cut and on die-cut length.
         if (slot >= 0 && !s_media_queried[slot]) {
             s_media_queried[slot] = true;
-            s_media_profiles[slot] = brother_ql_query_media(printer, printer->model);
+            BrotherQLStatus status = {};
+            s_media_profiles[slot] = brother_ql_query_media(printer, printer->model, &status);
             if (s_media_profiles[slot]) {
-                ESP_LOGI(TAG, "Printer %d media: %dmm (%dpx)", slot + 1,
-                         s_media_profiles[slot]->width_mm, s_media_profiles[slot]->printable_px);
+                s_media_type[slot] = status.media_type;
+                s_media_length_mm[slot] = status.media_length;
+                ESP_LOGI(TAG, "Printer %d media: %dmm type=0x%02X length=%dmm (%dpx)",
+                         slot + 1, s_media_profiles[slot]->width_mm,
+                         s_media_type[slot], s_media_length_mm[slot],
+                         s_media_profiles[slot]->printable_px);
             }
         }
 
@@ -175,7 +188,17 @@ static void print_task(void *arg) {
         uint16_t render_w = profile ? profile->printable_px : LABEL_PRINTABLE_W;
         uint16_t render_h = LABEL_PRINTABLE_H;
 
-        const uint8_t *fb = label_renderer_render(msg.name, render_w, render_h);
+        label_render_req_t req = {};
+        req.mode = msg.mode;
+        req.name = msg.name;
+        req.email = msg.email;
+        req.phone = msg.phone;
+        req.fb_w = render_w;
+        req.fb_h = render_h;
+        req.media_type = (slot >= 0) ? s_media_type[slot] : 0x0B;          // default die-cut
+        req.media_length_mm = (slot >= 0) ? s_media_length_mm[slot] : 0;
+
+        const uint8_t *fb = label_renderer_render(&req);
         if (fb == nullptr) {
             xSemaphoreGive(s_printer_mutex);
             ESP_LOGE(TAG, "Render failed");
@@ -195,7 +218,8 @@ static void print_task(void *arg) {
                      detected->width_mm, detected->printable_px);
             if (slot >= 0) s_media_profiles[slot] = detected;
             render_w = detected->printable_px;
-            fb = label_renderer_render(msg.name, render_w, render_h);
+            req.fb_w = render_w;
+            fb = label_renderer_render(&req);
             if (fb) {
                 fb_stride = label_renderer_stride();
                 print_err[0] = '\0';
@@ -225,10 +249,13 @@ static void print_task(void *arg) {
 static uint32_t s_last_card_id = 0;
 static int64_t  s_last_print_time = 0;
 
-static void enqueue_print(uint32_t card_id, const char *name) {
-    print_msg_t msg;
+static void enqueue_print(uint32_t card_id, int mode, const char *name,
+                          const char *email, const char *phone) {
+    print_msg_t msg = {};
+    msg.mode = mode;
     strncpy(msg.name, name, sizeof(msg.name) - 1);
-    msg.name[sizeof(msg.name) - 1] = '\0';
+    strncpy(msg.email, email ? email : "", sizeof(msg.email) - 1);
+    strncpy(msg.phone, phone ? phone : "", sizeof(msg.phone) - 1);
     xQueueSend(s_print_queue, &msg, 0);
 }
 
@@ -469,7 +496,8 @@ extern "C" void app_main(void) {
             } else {
                 buzzer_beep_good();
                 lcd_override(0, result.name, 3000);
-                enqueue_print(card_id, result.name);
+                enqueue_print(card_id, mode_switch_current(),
+                              result.name, result.email, result.phone);
             }
 
             s_last_card_id = card_id;
@@ -485,7 +513,7 @@ extern "C" void app_main(void) {
                 btn_triggered = true;
                 ESP_LOGI(TAG, "Button held 1s — test print");
                 lcd_override(0, "Test print...", 3000);
-                enqueue_print(0, "TEST");
+                enqueue_print(0, mode_switch_current(), "TEST", "", "");
             }
         } else {
             btn_press_start = 0;

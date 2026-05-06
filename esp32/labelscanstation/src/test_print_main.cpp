@@ -64,7 +64,16 @@ extern "C" void app_main(void) {
     uint16_t render_h = LABEL_PRINTABLE_H;
 
     ESP_LOGI(TAG, "Rendering test label (%dx%d)...", render_w, render_h);
-    const uint8_t *fb = label_renderer_render("TEST PRINT", render_w, render_h);
+    label_render_req_t req = {};
+    req.mode = 1;
+    req.name = "TEST PRINT";
+    req.email = "";
+    req.phone = "";
+    req.fb_w = render_w;
+    req.fb_h = render_h;
+    req.media_type = 0x0B;       // assume die-cut for test_print env
+    req.media_length_mm = 90;
+    const uint8_t *fb = label_renderer_render(&req);
 
     // Print it
     ESP_LOGI(TAG, "Sending to printer...");

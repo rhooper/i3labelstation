@@ -190,11 +190,24 @@ uint16_t label_renderer_stride() {
     return s_render_stride;
 }
 
-const uint8_t *label_renderer_render(const char *name, uint16_t width, uint16_t height) {
+const uint8_t *label_renderer_render(const label_render_req_t *req) {
     if (!s_font_ready) {
         ESP_LOGE(TAG, "Font not initialized");
         return nullptr;
     }
+    if (!req || !req->name) {
+        ESP_LOGE(TAG, "Null render request");
+        return nullptr;
+    }
+    const char *name = req->name;
+    uint16_t width = req->fb_w;
+    uint16_t height = req->fb_h;
+    // mode / email / phone / media_type / media_length_mm consumed in later commits.
+    (void)req->mode;
+    (void)req->email;
+    (void)req->phone;
+    (void)req->media_type;
+    (void)req->media_length_mm;
 
     // Store render dimensions for set_pixel bounds and stride getter
     s_render_width = width;
