@@ -435,11 +435,13 @@ extern "C" void app_main(void) {
     usb_host_set_printer_callback(on_printer_event);
     usb_host_init();
 
-    // Initialize button GPIO (simple input, no ISR — we poll for long-press)
+    // Initialize button GPIOs (simple input, no ISR — we poll for long-press
+    // on BUTTON_GPIO, and log Option-button changes on OPTION_BUTTON_GPIO so
+    // we can verify wiring before committing to a driver.)
     gpio_config_t btn_conf = {};
     btn_conf.intr_type = GPIO_INTR_DISABLE;
     btn_conf.mode = GPIO_MODE_INPUT;
-    btn_conf.pin_bit_mask = (1ULL << BUTTON_GPIO);
+    btn_conf.pin_bit_mask = (1ULL << BUTTON_GPIO) | (1ULL << OPTION_BUTTON_GPIO);
     btn_conf.pull_up_en = GPIO_PULLUP_ENABLE;
     ESP_ERROR_CHECK(gpio_config(&btn_conf));
 
@@ -515,6 +517,16 @@ extern "C" void app_main(void) {
 
             s_last_card_id = card_id;
             s_last_print_time = esp_timer_get_time();
+        }
+
+        // Diagnostic: log Option-button level changes (active-low). No driver
+        // yet — this just confirms the wiring works before we commit to one.
+        static int s_last_option = 1;
+        int option_now = gpio_get_level(OPTION_BUTTON_GPIO);
+        if (option_now != s_last_option) {
+            ESP_LOGI(TAG, "Option button (GPIO%d) %s",
+                     OPTION_BUTTON_GPIO, option_now ? "released" : "pressed");
+            s_last_option = option_now;
         }
 
         // Button handling: long press = test print
