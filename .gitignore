@@ -39,3 +39,6 @@ brother_ql_web/
 
 # Claude
 .claude/
+
+# Worktrees
+.worktrees/
