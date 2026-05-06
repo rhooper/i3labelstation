@@ -33,10 +33,12 @@ static time_t s_last_refresh = 0;  // unix timestamp of last successful refresh
 
 #define STALE_THRESHOLD_SECS (16 * 3600)  // 16 hours
 
-// Pre-allocated HTTP receive buffer. Sized to comfortably hold one HelloClub
-// page (the full-fields response is ~18 KB; 32 KB leaves headroom and avoids
-// realloc-grown fragmentation on every refresh).
-#define HTTP_BUF_CAPACITY (32 * 1024)
+// Pre-allocated HTTP receive buffer. We page the API in small chunks
+// (PAGE_LIMIT profiles per request) so each response easily fits in 8 KB and
+// the buffer can stay small permanently — same fragmentation fix as a 32 KB
+// buffer, with 24 KB more heap headroom for stb_truetype's rasterizer.
+#define HTTP_BUF_CAPACITY (8 * 1024)
+#define PAGE_LIMIT 25
 static char *s_http_buf = nullptr;
 
 static bool add_entry(card_entry_t **cards, int *count, int *capacity,
@@ -226,11 +228,12 @@ bool card_lookup_refresh() {
     bool success = true;
 
     do {
-        // Build URL with pagination
+        // Build URL with pagination. Small page size keeps each response well
+        // under HTTP_BUF_CAPACITY.
         char url[256];
         snprintf(url, sizeof(url),
-                 "%s?fields=%s&withCurrentMembership=true&offset=%d",
-                 API_URL, API_FIELDS, offset);
+                 "%s?fields=%s&withCurrentMembership=true&limit=%d&offset=%d",
+                 API_URL, API_FIELDS, PAGE_LIMIT, offset);
 
         if (!s_http_buf) {
             ESP_LOGE(TAG, "HTTP buffer not allocated");
