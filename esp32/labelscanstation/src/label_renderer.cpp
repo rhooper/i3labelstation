@@ -354,21 +354,35 @@ static void render_normal(const label_render_req_t *req) {
     time(&now);
     struct tm timeinfo;
     localtime_r(&now, &timeinfo);
-    char date_str[32];
+    char date_str[48];
     if (timeinfo.tm_year > (2020 - 1900)) {
         // Format: "Mon-D-YYYY" e.g. "May-5-2026". Built piecewise because
         // newlib's strftime doesn't support the GNU/BSD %-d (no-zero-pad)
         // extension — that produced garbage on-target.
         char month[8];
         strftime(month, sizeof(month), "%b", &timeinfo);
-        snprintf(date_str, sizeof(date_str), "%s-%d-%d",
-                 month, timeinfo.tm_mday, timeinfo.tm_year + 1900);
+        if (req->mode == 3) {
+            // PERMIT: render a date range "<today> to <today + N days>"
+            // instead of a single date. Same fb_y position (left-aligned).
+            time_t future = now + (time_t)req->days * 86400;
+            struct tm later;
+            localtime_r(&future, &later);
+            char m2[8];
+            strftime(m2, sizeof(m2), "%b", &later);
+            snprintf(date_str, sizeof(date_str), "%s-%d-%d to %s-%d-%d",
+                     month, timeinfo.tm_mday, timeinfo.tm_year + 1900,
+                     m2, later.tm_mday, later.tm_year + 1900);
+        } else {
+            snprintf(date_str, sizeof(date_str), "%s-%d-%d",
+                     month, timeinfo.tm_mday, timeinfo.tm_year + 1900);
+        }
     } else {
         snprintf(date_str, sizeof(date_str), "(no time sync)");
     }
     render_string_rot(date_str, date_scale, date_fb_x, text_y_start);
 
     // Email line just above the date, same font, same left edge.
+    // Shown in NORMAL (mode 1) and PERMIT (mode 3).
     if (req->email && req->email[0]) {
         int email_fb_x = date_fb_x + date_line_height + 2;
         render_string_rot(req->email, date_scale, email_fb_x, text_y_start);
@@ -477,59 +491,6 @@ static void render_short(const label_render_req_t *req, int fb_y_start, int fb_y
     ESP_LOGI(TAG, "Short label: '%s' [fb_y %d..%d]", req->name, fb_y_start, fb_y_end);
 }
 
-// Mode 3 (PERMIT): no logo, name top-aligned (wrapped, name font), and a
-// single date string "<today> - <today + N days>" at the bottom-left edge.
-// No time-of-day, no email, no phone. Always full label length.
-static void render_permit(const label_render_req_t *req) {
-    int ascent, descent, line_gap;
-    stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &line_gap);
-
-    uint16_t width = req->fb_w;
-    uint16_t height = req->fb_h;
-
-    float scale_factor = (float)width / REF_WIDTH;
-    float name_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(NAME_PX_HEIGHT * scale_factor));
-    float date_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(DATE_PX_HEIGHT * scale_factor));
-
-    // No logo on permits — start text at the left margin.
-    int text_y_start = 5;
-
-    // Name top-aligned, wrapped.
-    int name_descent_px = (int)(-descent * name_scale + 0.5f);
-    int name_fb_x = width - name_descent_px;
-    int max_line_width = height - text_y_start - 5;
-    render_wrapped(req->name, name_scale, name_fb_x, text_y_start, max_line_width);
-
-    // "Mon-D-YYYY - Mon-D-YYYY" — today and today+N days.
-    int date_ascent_px = (int)(ascent * date_scale + 0.5f);
-    int date_bottom_margin = 2;
-    int date_fb_x = date_ascent_px + date_bottom_margin;
-
-    time_t now;
-    time(&now);
-    struct tm today;
-    localtime_r(&now, &today);
-
-    char date_str[48];
-    if (today.tm_year > (2020 - 1900)) {
-        time_t future = now + (time_t)req->days * 86400;
-        struct tm later;
-        localtime_r(&future, &later);
-        char m1[8], m2[8];
-        strftime(m1, sizeof(m1), "%b", &today);
-        strftime(m2, sizeof(m2), "%b", &later);
-        snprintf(date_str, sizeof(date_str), "%s-%d-%d - %s-%d-%d",
-                 m1, today.tm_mday, today.tm_year + 1900,
-                 m2, later.tm_mday, later.tm_year + 1900);
-    } else {
-        snprintf(date_str, sizeof(date_str), "(no time sync)");
-    }
-    render_string_rot(date_str, date_scale, date_fb_x, text_y_start);
-
-    ESP_LOGI(TAG, "Permit label: '%s' / %s (%dpx, %d days)",
-             req->name, date_str, width, req->days);
-}
-
 const uint8_t *label_renderer_render(const label_render_req_t *req) {
     if (!s_font_ready) {
         ESP_LOGE(TAG, "Font not initialized");
@@ -557,9 +518,7 @@ const uint8_t *label_renderer_render(const label_render_req_t *req) {
     ESP_LOGI(TAG, "Rendering mode=%d %dx%d (stride=%d, %u bytes)",
              req->mode, width, height, s_render_stride, (unsigned)fb_size);
 
-    if (req->mode == 3) {
-        render_permit(req);
-    } else if (req->mode == 2) {
+    if (req->mode == 2) {
         // Mode 2: SHORT layout, media-aware print quantity.
         if (req->media_type == MEDIA_TYPE_DIE_CUT && req->media_length_mm >= 90) {
             // Two short layouts stacked on one die-cut piece, with a cut guide.
