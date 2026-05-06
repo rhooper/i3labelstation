@@ -87,10 +87,9 @@ extern "C" void stbtt_arena_free(void *p) {
 // Font pixel heights for 29mm (306px) reference width
 // Scaled proportionally for other widths
 #define REF_WIDTH       306
-#define NAME_PX_HEIGHT       127  // ~12mm at 306px
-#define SHORT_NAME_PX_HEIGHT  85  // larger than DATE for short labels
-#define DATE_PX_HEIGHT        63  // ~6mm at 306px
-#define TIME_PX_HEIGHT        42  // ~4mm at 306px
+#define NAME_PX_HEIGHT  127  // ~12mm at 306px
+#define DATE_PX_HEIGHT  63   // ~6mm at 306px
+#define TIME_PX_HEIGHT  42   // ~4mm at 306px
 
 // Set a pixel in the 1-bit framebuffer
 static inline void set_pixel(int x, int y) {
@@ -428,12 +427,12 @@ static void render_short(const label_render_req_t *req, int fb_y_start, int fb_y
     uint16_t width = req->fb_w;
 
     float scale_factor = (float)width / REF_WIDTH;
-    float short_name_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(SHORT_NAME_PX_HEIGHT * scale_factor));
     float date_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(DATE_PX_HEIGHT * scale_factor));
     float time_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(TIME_PX_HEIGHT * scale_factor));
 
-    int short_name_descent_px = (int)(-descent * short_name_scale + 0.5f);
+    int date_descent_px = (int)(-descent * date_scale + 0.5f);
     int date_ascent_px = (int)(ascent * date_scale + 0.5f);
+    int date_line_height = (int)((ascent - descent) * date_scale + 0.5f);
     int date_bottom_margin = 2;
     int date_fb_x = date_ascent_px + date_bottom_margin;
     int time_ascent_px = (int)(ascent * time_scale + 0.5f);
@@ -445,9 +444,10 @@ static void render_short(const label_render_req_t *req, int fb_y_start, int fb_y
     int span = fb_y_end - fb_y_start;
     int max_line_width = span - left_margin - right_margin;
 
-    // Name in larger SHORT_NAME font, wrapped, top-aligned (high fb_x).
-    int name_fb_x = width - short_name_descent_px;
-    render_wrapped(req->name, short_name_scale, name_fb_x, fb_y_start + left_margin, max_line_width);
+    // Name in date-font, wrapped, top-aligned (high fb_x, near top of label).
+    int name_fb_x = width - date_descent_px;
+    render_wrapped(req->name, date_scale, name_fb_x, fb_y_start + left_margin, max_line_width);
+    (void)date_line_height;  // available if we later care about post-wrap fb_x
 
     // Date — bottom-left of this layout's span.
     time_t now;
@@ -485,34 +485,6 @@ static void render_short(const label_render_req_t *req, int fb_y_start, int fb_y
             int phone_width = measure_string(req->phone, time_scale);
             int phone_fb_y = fb_y_end - phone_width - right_margin;
             render_string_rot(req->phone, time_scale, phone_fb_x, phone_fb_y);
-        }
-    }
-
-    // Email: left-justified, just above the phone line. Wraps at '@' to a
-    // second line if the full string doesn't fit on one line at time_scale.
-    if (req->email && req->email[0]) {
-        int email_max_width = span - left_margin - right_margin;
-        int email_full_w = measure_string(req->email, time_scale);
-        int phone_fb_x = time_fb_x + time_line_height + 2;
-        const char *at = strchr(req->email, '@');
-        bool need_split = (email_full_w > email_max_width) && at;
-
-        if (need_split) {
-            // Two lines: local-part on top, "@domain" below. Position the
-            // bottom line just above the phone row; top line one line up.
-            char local[LOOKUP_EMAIL_MAX];
-            int n = (int)(at - req->email);
-            if (n >= (int)sizeof(local)) n = sizeof(local) - 1;
-            memcpy(local, req->email, n);
-            local[n] = '\0';
-            int top_fb_x = phone_fb_x + 2 * (time_line_height + 2);
-            int bot_fb_x = phone_fb_x + (time_line_height + 2);
-            render_string_rot(local, time_scale, top_fb_x, fb_y_start + left_margin);
-            render_string_rot(at,    time_scale, bot_fb_x, fb_y_start + left_margin);
-        } else {
-            int email_fb_x = phone_fb_x + (time_line_height + 2);
-            render_string_rot(req->email, time_scale, email_fb_x,
-                              fb_y_start + left_margin);
         }
     }
 
