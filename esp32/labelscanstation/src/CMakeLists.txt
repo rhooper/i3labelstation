@@ -12,6 +12,7 @@ idf_component_register(
         "lcd_display.cpp"
         "card_lookup.cpp"
         "buzzer.cpp"
+        "mode_switch.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         usb
