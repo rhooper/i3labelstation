@@ -413,6 +413,20 @@ static void on_mode_change(int new_mode) {
     if (s_lcd_task_handle) xTaskNotifyGive(s_lcd_task_handle);
 }
 
+// LCD override during HelloClub DB fetch — fires once per page of the API.
+static void on_db_progress(int fetched, int total) {
+    char line2[17];
+    if (total > 0 && fetched >= total) {
+        snprintf(line2, sizeof(line2), "Loaded %d!", fetched);
+        lcd_override(0, "  HelloClub", 1500);
+        lcd_override(1, line2, 1500);
+    } else if (total > 0) {
+        snprintf(line2, sizeof(line2), "Loading %d/%d", fetched, total);
+        lcd_override(0, "  HelloClub", 30000);
+        lcd_override(1, line2, 30000);
+    }
+}
+
 // =====================================================================
 // Temporary GPIO scanner — confirm the Option button pin
 // =====================================================================
@@ -487,6 +501,7 @@ extern "C" void app_main(void) {
 
     // Initialize card lookup DB
     card_lookup_init();
+    card_lookup_set_progress_cb(on_db_progress);
 
     // Initialize buzzer
     buzzer_init();

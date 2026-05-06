@@ -41,6 +41,12 @@ static time_t s_last_refresh = 0;  // unix timestamp of last successful refresh
 #define PAGE_LIMIT 25
 static char *s_http_buf = nullptr;
 
+static card_lookup_progress_cb_t s_progress_cb = nullptr;
+
+void card_lookup_set_progress_cb(card_lookup_progress_cb_t cb) {
+    s_progress_cb = cb;
+}
+
 static bool add_entry(card_entry_t **cards, int *count, int *capacity,
                       uint32_t card_id, const char *name,
                       const char *email, const char *phone);
@@ -319,6 +325,7 @@ bool card_lookup_refresh() {
         fetched += page_count;
 
         ESP_LOGI(TAG, "Fetched %d/%d profiles", fetched, total);
+        if (s_progress_cb) s_progress_cb(fetched, total);
 
         cJSON *profile;
         cJSON_ArrayForEach(profile, profiles) {

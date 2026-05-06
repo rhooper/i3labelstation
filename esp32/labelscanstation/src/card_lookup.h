@@ -31,6 +31,12 @@ int card_lookup_count();
 // Returns true if the DB hasn't been refreshed in over 16 hours.
 bool card_lookup_is_stale();
 
+// Optional progress callback invoked after each page of the API fetch.
+// `fetched` and `total` come from the API's meta block. Pass `nullptr`
+// to disable.
+typedef void (*card_lookup_progress_cb_t)(int fetched, int total);
+void card_lookup_set_progress_cb(card_lookup_progress_cb_t cb);
+
 // Unix timestamp of the last successful API refresh, or 0 if never.
 time_t card_lookup_last_refresh();
 
