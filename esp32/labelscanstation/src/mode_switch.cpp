@@ -13,15 +13,16 @@ static const char *TAG = "mode_switch";
 static int s_current_mode = 1;
 static mode_switch_change_cb_t s_change_cb = nullptr;
 
-// Standard SP3T encoding: each detent grounds at most one pin.
-//   (1, 1) -> 1   neither grounded
-//   (1, 0) -> 2   B grounded
-//   (0, 1) -> 3   A grounded
+// Standard SP3T slide switch with the middle detent floating both pins.
+// Physical detent order (left -> middle -> right) maps to modes 1 -> 2 -> 3:
+//   (0, 1) -> 1   left detent  (A grounded)
+//   (1, 1) -> 2   middle       (neither grounded)
+//   (1, 0) -> 3   right detent (B grounded)
 //   (0, 0) -> 0   never reached on a real switch (treat as invalid)
 static int decode_mode(int a, int b) {
-    if (a == 1 && b == 1) return 1;
-    if (a == 1 && b == 0) return 2;
-    if (a == 0 && b == 1) return 3;
+    if (a == 0 && b == 1) return 1;
+    if (a == 1 && b == 1) return 2;
+    if (a == 1 && b == 0) return 3;
     return 0;
 }
 
