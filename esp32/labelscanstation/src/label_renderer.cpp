@@ -8,6 +8,7 @@
 #include "label_renderer.h"
 #include "card_lookup.h"
 #include "app_config.h"
+#include "brother_ql.h"
 #include "i3logo.h"
 #include "roboto_bold.h"
 
@@ -32,8 +33,6 @@ static uint16_t s_render_stride = LABEL_FB_STRIDE;
 #define NAME_PX_HEIGHT  127  // ~12mm at 306px
 #define DATE_PX_HEIGHT  63   // ~6mm at 306px
 #define TIME_PX_HEIGHT  42   // ~4mm at 306px
-// Narrow labels (< 130px): name only, smaller font
-#define NARROW_NAME_PX  80
 
 // Set a pixel in the 1-bit framebuffer
 static inline void set_pixel(int x, int y) {
@@ -52,7 +51,6 @@ static void blit_glyph_rotated(const uint8_t *bitmap, int bw, int bh,
         for (int gx = 0; gx < bw; gx++) {
             uint8_t alpha = bitmap[gy * bw + gx];
             if (alpha > 127) {  // threshold to 1-bit
-                // Rotated: text x → fb y, text y → fb -x
                 int fb_x = origin_fb_x - (glyph_y_off + gy);
                 int fb_y = origin_fb_y + (glyph_x_off + gx);
                 set_pixel(fb_x, fb_y);
@@ -84,15 +82,11 @@ static int utf8_decode(const char **p) {
     return ch;
 }
 
-// Peek at next UTF-8 codepoint without advancing
 static int utf8_peek_next(const char *p) {
     return utf8_decode(&p);
 }
 
 // Render a string rotated 90° CCW using stb_truetype (UTF-8 input).
-// fb_x: baseline x-position in framebuffer (text extends upward from here)
-// fb_y: starting y-position (text advances in +y direction)
-// Returns the total advance in fb y-pixels.
 static int render_string_rot(const char *str, float scale, int fb_x, int fb_y) {
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &line_gap);
@@ -124,7 +118,6 @@ static int render_string_rot(const char *str, float scale, int fb_x, int fb_y) {
 
         x_pos += advance * scale;
 
-        // Kerning with next character
         if (*next) {
             int next_ch = utf8_peek_next(next);
             int kern = stbtt_GetCodepointKernAdvance(&s_font, ch, next_ch);
@@ -135,7 +128,6 @@ static int render_string_rot(const char *str, float scale, int fb_x, int fb_y) {
     return (int)(x_pos + 0.5f);
 }
 
-// Measure string width in pixels at given scale (UTF-8 input)
 static int measure_string(const char *str, float scale) {
     float x_pos = 0;
     const char *p = str;
@@ -155,9 +147,6 @@ static int measure_string(const char *str, float scale) {
     return (int)(x_pos + 0.5f);
 }
 
-// Draw the i3 logo bitmap at position (dst_x, dst_y) in the framebuffer, rotated 90° CCW.
-// scale: integer scale factor (1=original, 2=double, etc.)
-// After rotation: logo occupies HEIGHT*scale px in x, WIDTH*scale px in y.
 static void draw_logo(int dst_x, int dst_y, int scale = 1) {
     for (int y = 0; y < I3LOGO_HEIGHT; y++) {
         for (int x = 0; x < I3LOGO_WIDTH; x++) {
@@ -176,6 +165,72 @@ static void draw_logo(int dst_x, int dst_y, int scale = 1) {
     }
 }
 
+// Faint dotted line across the framebuffer width at the given fb_y.
+// Used to mark the cut boundary between two stacked short labels (Mode 2,
+// die-cut >= 90mm).
+static void draw_cut_guide(int fb_y) {
+    for (int x = 5; x < (int)s_render_width - 5; x += 6) {
+        set_pixel(x, fb_y);
+        set_pixel(x, fb_y + 1);
+    }
+}
+
+// Word-wrap helper: render `text` at `font_scale` starting with first line's
+// baseline at fb_x = start_fb_x, lines stacking toward lower fb_x. Lines are
+// laid out at fb_y = fb_y_left (the left edge of each line in the rotated
+// frame). Caller picks max_line_width.
+//
+// Returns the fb_x of the (top) baseline below the last line — the next
+// line's baseline if more text were added.
+static int render_wrapped(const char *text, float font_scale,
+                          int start_fb_x, int fb_y_left, int max_line_width) {
+    int ascent, descent, line_gap;
+    stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &line_gap);
+    int line_height = (int)((ascent - descent) * font_scale + 0.5f);
+
+    char buf[LOOKUP_NAME_MAX];
+    strncpy(buf, text, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    const char *words[16];
+    int word_count = 0;
+    char *saveptr;
+    char *tok = strtok_r(buf, " ", &saveptr);
+    while (tok && word_count < 16) {
+        words[word_count++] = tok;
+        tok = strtok_r(nullptr, " ", &saveptr);
+    }
+
+    int space_width = measure_string(" ", font_scale);
+    int cur_fb_x = start_fb_x;
+    int line_start = 0;
+
+    while (line_start < word_count) {
+        char line[LOOKUP_NAME_MAX] = {};
+        int line_width = 0;
+        int line_end = line_start;
+
+        for (int i = line_start; i < word_count; i++) {
+            int w = measure_string(words[i], font_scale);
+            int trial = (i == line_start) ? w : line_width + space_width + w;
+            if (trial > max_line_width && i > line_start)
+                break;
+            if (i > line_start) {
+                strcat(line, " ");
+                line_width += space_width;
+            }
+            strcat(line, words[i]);
+            line_width += w;
+            line_end = i + 1;
+        }
+
+        render_string_rot(line, font_scale, cur_fb_x, fb_y_left);
+        cur_fb_x -= line_height + 2;
+        line_start = line_end;
+    }
+    return cur_fb_x;
+}
+
 void label_renderer_init() {
     int offset = stbtt_GetFontOffsetForIndex(roboto_bold_ttf, 0);
     if (!stbtt_InitFont(&s_font, roboto_bold_ttf, offset)) {
@@ -190,41 +245,19 @@ uint16_t label_renderer_stride() {
     return s_render_stride;
 }
 
-const uint8_t *label_renderer_render(const label_render_req_t *req) {
-    if (!s_font_ready) {
-        ESP_LOGE(TAG, "Font not initialized");
-        return nullptr;
-    }
-    if (!req || !req->name) {
-        ESP_LOGE(TAG, "Null render request");
-        return nullptr;
-    }
-    const char *name = req->name;
-    uint16_t width = req->fb_w;
-    uint16_t height = req->fb_h;
-    // media_type / media_length_mm consumed in the Mode 2 dispatcher.
-    (void)req->media_type;
-    (void)req->media_length_mm;
+// =====================================================================
+// Mode-specific renderers
+// =====================================================================
 
-    // Store render dimensions for set_pixel bounds and stride getter
-    s_render_width = width;
-    s_render_height = height;
-    s_render_stride = (width + 7) / 8;
-
-    size_t fb_size = (size_t)s_render_stride * height;
-    if (fb_size > LABEL_FB_SIZE) {
-        ESP_LOGE(TAG, "Framebuffer too small: need %u, have %d", (unsigned)fb_size, LABEL_FB_SIZE);
-        return nullptr;
-    }
-    memset(s_framebuffer, 0, fb_size);
-
-    ESP_LOGI(TAG, "Rendering %dx%d (stride=%d, %u bytes)", width, height, s_render_stride, (unsigned)fb_size);
-
-    // Font metrics
+// Mode 1 (NORMAL): full layout — logo + name + email + date + time + phone.
+// Always renders into the full framebuffer [0, fb_h).
+static void render_normal(const label_render_req_t *req) {
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &line_gap);
 
-    // Scale font sizes proportionally to width
+    uint16_t width = req->fb_w;
+    uint16_t height = req->fb_h;
+
     float scale_factor = (float)width / REF_WIDTH;
     float name_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(NAME_PX_HEIGHT * scale_factor));
     float date_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(DATE_PX_HEIGHT * scale_factor));
@@ -240,52 +273,9 @@ const uint8_t *label_renderer_render(const label_render_req_t *req) {
 
     // Name — top-aligned, with word wrapping
     int name_descent_px = (int)(-descent * name_scale + 0.5f);
-    int name_line_height = (int)((ascent - descent) * name_scale + 0.5f);
     int name_fb_x = width - name_descent_px;
     int max_line_width = height - text_y_start - 20;
-
-    {
-        char name_buf[LOOKUP_NAME_MAX];
-        strncpy(name_buf, name, sizeof(name_buf) - 1);
-        name_buf[sizeof(name_buf) - 1] = '\0';
-
-        const char *words[16];
-        int word_count = 0;
-        char *saveptr;
-        char *tok = strtok_r(name_buf, " ", &saveptr);
-        while (tok && word_count < 16) {
-            words[word_count++] = tok;
-            tok = strtok_r(nullptr, " ", &saveptr);
-        }
-
-        int space_width = measure_string(" ", name_scale);
-        int cur_fb_x = name_fb_x;
-        int line_start = 0;
-
-        while (line_start < word_count) {
-            char line[LOOKUP_NAME_MAX] = {};
-            int line_width = 0;
-            int line_end = line_start;
-
-            for (int i = line_start; i < word_count; i++) {
-                int w = measure_string(words[i], name_scale);
-                int trial = (i == line_start) ? w : line_width + space_width + w;
-                if (trial > max_line_width && i > line_start)
-                    break;
-                if (i > line_start) {
-                    strcat(line, " ");
-                    line_width += space_width;
-                }
-                strcat(line, words[i]);
-                line_width += w;
-                line_end = i + 1;
-            }
-
-            render_string_rot(line, name_scale, cur_fb_x, text_y_start);
-            cur_fb_x -= name_line_height + 2;
-            line_start = line_end;
-        }
-    }
+    render_wrapped(req->name, name_scale, name_fb_x, text_y_start, max_line_width);
 
     // Date — bottom-left, format Mon-D-YYYY (3-letter month, no zero-pad on day).
     int date_ascent_px = (int)(ascent * date_scale + 0.5f);
@@ -305,13 +295,13 @@ const uint8_t *label_renderer_render(const label_render_req_t *req) {
     }
     render_string_rot(date_str, date_scale, date_fb_x, text_y_start);
 
-    // Mode 1: email line just above the date, same font, same left edge (fb_y).
-    if (req->mode == 1 && req->email && req->email[0]) {
+    // Email line just above the date, same font, same left edge.
+    if (req->email && req->email[0]) {
         int email_fb_x = date_fb_x + date_line_height + 2;
         render_string_rot(req->email, date_scale, email_fb_x, text_y_start);
     }
 
-    // Time — bottom-right, smaller font. Phone (Mode 1) sits just above it.
+    // Time — bottom-right, smaller font. Phone sits just above it.
     if (timeinfo.tm_year > (2020 - 1900)) {
         char time_str[16];
         int hour12 = timeinfo.tm_hour % 12;
@@ -327,18 +317,130 @@ const uint8_t *label_renderer_render(const label_render_req_t *req) {
         int time_fb_y = height - time_width - right_margin;
         render_string_rot(time_str, time_scale, time_fb_x, time_fb_y);
 
-        if (req->mode == 1 && req->phone && req->phone[0]) {
+        if (req->phone && req->phone[0]) {
             int phone_fb_x = time_fb_x + time_line_height + 2;
             int phone_width = measure_string(req->phone, time_scale);
             int phone_fb_y = height - phone_width - right_margin;
             render_string_rot(req->phone, time_scale, phone_fb_x, phone_fb_y);
         }
 
-        ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + '%s' + logo (%dpx wide)", name, date_str, time_str, width);
+        ESP_LOGI(TAG, "Normal label: '%s' + '%s' + '%s' (%dpx)", req->name, date_str, time_str, width);
     } else {
-        ESP_LOGI(TAG, "Label rendered: '%s' + '%s' + logo (%dpx wide)", name, date_str, width);
+        ESP_LOGI(TAG, "Normal label: '%s' + '%s' (%dpx)", req->name, date_str, width);
+    }
+}
+
+// Mode 2 (SHORT): no logo, name in date-font (wrapped, top-aligned), date,
+// time, phone. Renders into fb_y range [fb_y_start, fb_y_end) so a die-cut
+// >= 90mm can stack two layouts in one framebuffer.
+static void render_short(const label_render_req_t *req, int fb_y_start, int fb_y_end) {
+    int ascent, descent, line_gap;
+    stbtt_GetFontVMetrics(&s_font, &ascent, &descent, &line_gap);
+
+    uint16_t width = req->fb_w;
+
+    float scale_factor = (float)width / REF_WIDTH;
+    float date_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(DATE_PX_HEIGHT * scale_factor));
+    float time_scale = stbtt_ScaleForPixelHeight(&s_font, (int)(TIME_PX_HEIGHT * scale_factor));
+
+    int date_descent_px = (int)(-descent * date_scale + 0.5f);
+    int date_ascent_px = (int)(ascent * date_scale + 0.5f);
+    int date_line_height = (int)((ascent - descent) * date_scale + 0.5f);
+    int date_bottom_margin = 5;
+    int date_fb_x = date_ascent_px + date_bottom_margin;
+    int time_ascent_px = (int)(ascent * time_scale + 0.5f);
+    int time_line_height = (int)((ascent - descent) * time_scale + 0.5f);
+    int time_fb_x = time_ascent_px + date_bottom_margin;
+
+    int left_margin = 10;
+    int right_margin = 20;
+    int span = fb_y_end - fb_y_start;
+    int max_line_width = span - left_margin - right_margin;
+
+    // Name in date-font, wrapped, top-aligned (high fb_x, near top of label).
+    int name_fb_x = width - date_descent_px;
+    render_wrapped(req->name, date_scale, name_fb_x, fb_y_start + left_margin, max_line_width);
+    (void)date_line_height;  // available if we later care about post-wrap fb_x
+
+    // Date — bottom-left of this layout's span.
+    time_t now;
+    time(&now);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    char date_str[32];
+    if (timeinfo.tm_year > (2020 - 1900)) {
+        strftime(date_str, sizeof(date_str), "%b-%-d-%Y", &timeinfo);
+    } else {
+        snprintf(date_str, sizeof(date_str), "(no time sync)");
+    }
+    render_string_rot(date_str, date_scale, date_fb_x, fb_y_start + left_margin);
+
+    // Time + phone above it — bottom-right of this layout's span.
+    if (timeinfo.tm_year > (2020 - 1900)) {
+        char time_str[16];
+        int hour12 = timeinfo.tm_hour % 12;
+        if (hour12 == 0) hour12 = 12;
+        const char *ampm = timeinfo.tm_hour < 12 ? "am" : "pm";
+        snprintf(time_str, sizeof(time_str), "%d:%02d %s", hour12, timeinfo.tm_min, ampm);
+
+        int time_width = measure_string(time_str, time_scale);
+        int time_fb_y = fb_y_end - time_width - right_margin;
+        render_string_rot(time_str, time_scale, time_fb_x, time_fb_y);
+
+        if (req->phone && req->phone[0]) {
+            int phone_fb_x = time_fb_x + time_line_height + 2;
+            int phone_width = measure_string(req->phone, time_scale);
+            int phone_fb_y = fb_y_end - phone_width - right_margin;
+            render_string_rot(req->phone, time_scale, phone_fb_x, phone_fb_y);
+        }
+    }
+
+    ESP_LOGI(TAG, "Short label: '%s' [fb_y %d..%d]", req->name, fb_y_start, fb_y_end);
+}
+
+const uint8_t *label_renderer_render(const label_render_req_t *req) {
+    if (!s_font_ready) {
+        ESP_LOGE(TAG, "Font not initialized");
+        return nullptr;
+    }
+    if (!req || !req->name) {
+        ESP_LOGE(TAG, "Null render request");
+        return nullptr;
+    }
+
+    uint16_t width = req->fb_w;
+    uint16_t height = req->fb_h;
+
+    s_render_width = width;
+    s_render_height = height;
+    s_render_stride = (width + 7) / 8;
+
+    size_t fb_size = (size_t)s_render_stride * height;
+    if (fb_size > LABEL_FB_SIZE) {
+        ESP_LOGE(TAG, "Framebuffer too small: need %u, have %d", (unsigned)fb_size, LABEL_FB_SIZE);
+        return nullptr;
+    }
+    memset(s_framebuffer, 0, fb_size);
+
+    ESP_LOGI(TAG, "Rendering mode=%d %dx%d (stride=%d, %u bytes)",
+             req->mode, width, height, s_render_stride, (unsigned)fb_size);
+
+    if (req->mode == 2) {
+        // Mode 2: SHORT layout, media-aware print quantity.
+        if (req->media_type == MEDIA_TYPE_DIE_CUT && req->media_length_mm >= 90) {
+            // Two short layouts stacked on one die-cut piece, with a cut guide.
+            int mid = height / 2;
+            render_short(req, 0, mid);
+            render_short(req, mid, height);
+            draw_cut_guide(mid);
+        } else {
+            // Continuous (caller passed smaller fb_h) or shorter die-cut: one layout.
+            render_short(req, 0, height);
+        }
+    } else {
+        // Default to Mode 1 layout for any non-2 mode value.
+        render_normal(req);
     }
 
     return s_framebuffer;
 }
-

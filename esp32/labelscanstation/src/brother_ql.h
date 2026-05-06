@@ -7,6 +7,11 @@ struct PrinterState;
 struct ql_model_t;
 struct media_profile_t;
 
+// Media type bytes returned in the printer's status reply.
+#define MEDIA_TYPE_NONE       0x00
+#define MEDIA_TYPE_CONTINUOUS 0x0A
+#define MEDIA_TYPE_DIE_CUT    0x0B
+
 // Brother QL status response (32 bytes)
 struct BrotherQLStatus {
     uint8_t error_info_1;

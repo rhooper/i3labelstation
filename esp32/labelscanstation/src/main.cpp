@@ -195,8 +195,14 @@ static void print_task(void *arg) {
         req.phone = msg.phone;
         req.fb_w = render_w;
         req.fb_h = render_h;
-        req.media_type = (slot >= 0) ? s_media_type[slot] : 0x0B;          // default die-cut
+        req.media_type = (slot >= 0) ? s_media_type[slot] : MEDIA_TYPE_DIE_CUT;
         req.media_length_mm = (slot >= 0) ? s_media_length_mm[slot] : 0;
+
+        // Mode 2 on continuous tape: render half-height so the printer feeds
+        // ~45 mm of tape instead of the full 90 mm.
+        if (req.mode == 2 && req.media_type == MEDIA_TYPE_CONTINUOUS) {
+            req.fb_h = render_h / 2;
+        }
 
         const uint8_t *fb = label_renderer_render(&req);
         if (fb == nullptr) {
@@ -209,7 +215,7 @@ static void print_task(void *arg) {
         uint16_t fb_stride = label_renderer_stride();
         char print_err[17] = {};
         const media_profile_t *detected = nullptr;
-        bool ok = brother_ql_print(printer, printer->model, fb, render_w, render_h, fb_stride,
+        bool ok = brother_ql_print(printer, printer->model, fb, render_w, req.fb_h, fb_stride,
                                    print_err, sizeof(print_err), &detected);
 
         // If print detected different media, update profile, re-render and retry once
@@ -223,7 +229,7 @@ static void print_task(void *arg) {
             if (fb) {
                 fb_stride = label_renderer_stride();
                 print_err[0] = '\0';
-                ok = brother_ql_print(printer, printer->model, fb, render_w, render_h, fb_stride,
+                ok = brother_ql_print(printer, printer->model, fb, render_w, req.fb_h, fb_stride,
                                       print_err, sizeof(print_err));
             }
         }
