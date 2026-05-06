@@ -500,10 +500,17 @@ extern "C" void app_main(void) {
                 lcd_override(1, "NO PRINTER!", 4000);
                 ESP_LOGW(TAG, "Card '%s' OK but no printer", result.name);
             } else {
+                int mode = mode_switch_current();
                 buzzer_beep_good();
-                lcd_override(0, result.name, 3000);
-                enqueue_print(card_id, mode_switch_current(),
-                              result.name, result.email, result.phone);
+                if (mode == 3) {
+                    // Mode 3 is a placeholder — accept the scan but skip print.
+                    lcd_override(0, "MODE 3: TODO", 2000);
+                    lcd_override(1, result.name, 2000);
+                } else {
+                    lcd_override(0, result.name, 3000);
+                    enqueue_print(card_id, mode, result.name,
+                                  result.email, result.phone);
+                }
             }
 
             s_last_card_id = card_id;
