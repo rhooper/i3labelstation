@@ -10,6 +10,7 @@
 #include "lcd_display.h"
 #include "card_lookup.h"
 #include "buzzer.h"
+#include "mode_switch.h"
 
 #include <cstring>
 #include <cstdio>
@@ -251,6 +252,29 @@ static void format_idle_line(char *buf, size_t len, int64_t now) {
     snprintf(buf, len, "%s", show_fob ? "SCAN FOB" : "SCAN CARD");
 }
 
+// Right-aligned 6-char mode indicator for LCD line 0 (col 10..15).
+// Padding inside the literal aligns NORMAL/SHORT/TODO to col 15.
+static const char *mode_label(int m) {
+    switch (m) {
+        case 1: return "NORMAL";
+        case 2: return " SHORT";
+        case 3: return "  TODO";
+        default: return "      ";
+    }
+}
+
+// Append the current mode indicator to a steady-state idle line0 (e.g. SCAN CARD,
+// SCAN FOB, SCAN HAND). Pads the base text with spaces out to col 10, then writes
+// the 6-char mode field at cols 10..15. Caller passes a 17-char buffer.
+static void append_mode_indicator(char *line0) {
+    int len = (int)strlen(line0);
+    if (len > 10) len = 10;
+    while (len < 10) line0[len++] = ' ';
+    const char *m = mode_label(mode_switch_current());
+    memcpy(line0 + 10, m, 6);
+    line0[16] = '\0';
+}
+
 // Format clock line for line 2
 static const char *MONTH_ABBR[] = {
     "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
@@ -304,12 +328,15 @@ static void lcd_update_task(void *arg) {
         } else {
             const char *status = get_status_line();
             if (status) {
+                // Error states keep the full 16-char line — no mode indicator.
                 strncpy(line0, status, sizeof(line0));
                 line0[sizeof(line0) - 1] = '\0';
             } else if (easter_egg) {
                 snprintf(line0, sizeof(line0), "SCAN HAND");
+                append_mode_indicator(line0);
             } else {
                 format_idle_line(line0, sizeof(line0), now);
+                append_mode_indicator(line0);
             }
             format_clock(line1, sizeof(line1));
 
@@ -317,8 +344,16 @@ static void lcd_update_task(void *arg) {
             lcd_set_line(1, line1);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(500));
+        // Sleep up to 500ms; wake immediately when notified (e.g. mode change).
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
     }
+}
+
+static TaskHandle_t s_lcd_task_handle = nullptr;
+
+static void on_mode_change(int new_mode) {
+    (void)new_mode;
+    if (s_lcd_task_handle) xTaskNotifyGive(s_lcd_task_handle);
 }
 
 extern "C" void app_main(void) {
@@ -331,6 +366,10 @@ extern "C" void app_main(void) {
     // Initialize LCD display (auto-detects I2C address and pin order)
     lcd_init();
     lcd_status("Starting up...", "");
+
+    // Mode switch: read GPIO 36/37 for label-format selection.
+    mode_switch_init();
+    mode_switch_set_change_cb(on_mode_change);
 
     // Initialize printer states
     for (int i = 0; i < MAX_PRINTERS; i++)
@@ -377,8 +416,12 @@ extern "C" void app_main(void) {
     // Start print task
     xTaskCreate(print_task, "print_task", 16384, nullptr, 1, nullptr);
 
-    // Start LCD update task (refreshes clock + status every 500ms)
-    xTaskCreate(lcd_update_task, "lcd_update", 2048, nullptr, 1, nullptr);
+    // Start LCD update task (refreshes clock + status every 500ms, or on mode change)
+    xTaskCreate(lcd_update_task, "lcd_update", 2048, nullptr, 1, &s_lcd_task_handle);
+
+    // Mode-switch polling task. Started after LCD task so the change callback
+    // has a valid task handle to notify.
+    mode_switch_start_task();
 
     // LED: green when ready
     status_led_set(0, 20, 0);
