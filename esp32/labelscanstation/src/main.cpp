@@ -414,16 +414,17 @@ static void on_mode_change(int new_mode) {
 }
 
 // LCD override during HelloClub DB fetch — fires once per page of the API.
+// Each page completes in ~2 s; pages refresh the override before it expires.
 static void on_db_progress(int fetched, int total) {
     char line2[17];
     if (total > 0 && fetched >= total) {
         snprintf(line2, sizeof(line2), "Loaded %d!", fetched);
-        lcd_override(0, "  HelloClub", 1500);
-        lcd_override(1, line2, 1500);
+        lcd_override(0, "  HelloClub", 600);
+        lcd_override(1, line2, 600);
     } else if (total > 0) {
         snprintf(line2, sizeof(line2), "Loading %d/%d", fetched, total);
-        lcd_override(0, "  HelloClub", 30000);
-        lcd_override(1, line2, 30000);
+        lcd_override(0, "  HelloClub", 4000);
+        lcd_override(1, line2, 4000);
     }
 }
 
