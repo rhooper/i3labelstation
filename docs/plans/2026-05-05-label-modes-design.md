@@ -29,10 +29,11 @@ Switch encoding (each pin pulled up; switched contact pulls to ground):
 |------|-------------|-------------|
 | 1    | open        | open        |
 | 2    | open        | gnd         |
-| 3    | gnd         | gnd         |
+| 3    | gnd         | open        |
 
-A=gnd / B=open is invalid (only reachable mid-detent on a make-before-break
-switch); the polling task ignores transient invalid reads.
+(The original spec said position 3 grounds both pins; on-hardware testing
+showed the switch is a standard SP3T where each detent grounds at most one
+pin. `(0, 0)` never appears in practice — treat it as invalid.)
 
 ## Mode 1 — NORMAL
 

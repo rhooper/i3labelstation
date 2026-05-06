@@ -38,7 +38,7 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 | 19/20 | USB OTG Host |
 | 35 | Option button (normally open, grounded when pressed) |
 | 36 | Mode switch A (gnd in mode 3 only) |
-| 37 | Mode switch B (gnd in modes 2 & 3) |
+| 37 | Mode switch B (gnd in mode 2 only) |
 | 38 | Buzzer (passive piezo, PWM) |
 | 43/44 | UART0 (serial logs) |
 | 48 | WS2812 RGB LED |
@@ -119,13 +119,13 @@ Mode 2 print quantity (`label_renderer_render` dispatcher):
 - Die-cut ≥ 90mm: two stacked short layouts on a single piece, with a dotted cut guide at the midpoint.
 - Die-cut < 90mm: one short layout filling the piece.
 
-Switch encoding (each pin pulled up internally; switch contact pulls to ground):
+Switch encoding (standard SP3T — each pin pulled up internally; each detent grounds at most one pin):
 
 | Mode | A (GPIO 36) | B (GPIO 37) |
 |------|-------------|-------------|
 | 1    | open        | open        |
 | 2    | open        | gnd         |
-| 3    | gnd         | gnd         |
+| 3    | gnd         | open        |
 
 ### Card Database
 - Source: `cards.tsv` (decimal ID + tab + name)
