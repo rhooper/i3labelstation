@@ -22,6 +22,8 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 
 static const char *TAG = "main";
 
@@ -213,6 +215,9 @@ static void print_task(void *arg) {
         ESP_LOGI(TAG, "Print req: mode=%d days=%d media_type=0x%02X length=%dmm fb=%dx%d",
                  req.mode, req.days, req.media_type, req.media_length_mm,
                  req.fb_w, req.fb_h);
+        ESP_LOGI(TAG, "heap pre-render: free=%u largest_free=%u",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
 
         const uint8_t *fb = label_renderer_render(&req);
         if (fb == nullptr) {
@@ -246,6 +251,9 @@ static void print_task(void *arg) {
 
         xSemaphoreGive(s_printer_mutex);
 
+        ESP_LOGI(TAG, "heap post-render: free=%u largest_free=%u",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
         ESP_LOGI(TAG, "Print %s", ok ? "succeeded" : "FAILED");
         if (!ok) {
             if (strcmp(print_err, "BAD MEDIA") == 0) {
@@ -529,6 +537,9 @@ extern "C" void app_main(void) {
     // LED: green when ready
     status_led_set(0, 20, 0);
 
+    ESP_LOGI(TAG, "heap at boot: free=%u largest_free=%u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
     ESP_LOGI(TAG, "System ready — scan RFID card or press button (1s hold) to test print");
 
     // Main loop: handle RFID scans and button
