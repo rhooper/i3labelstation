@@ -42,6 +42,16 @@
 // Buzzer (passive piezo via PWM)
 #define BUZZER_GPIO         GPIO_NUM_38
 
+// Option button (normally open, grounded when pressed; use internal pull-up)
+#define OPTION_BUTTON_GPIO  GPIO_NUM_35
+
+// 3-position mode switch (each pin pulled up internally, grounded by switch)
+//   Mode 1: A open,  B open
+//   Mode 2: A open,  B gnd
+//   Mode 3: A gnd,   B gnd
+#define MODE_SWITCH_A_GPIO  GPIO_NUM_36
+#define MODE_SWITCH_B_GPIO  GPIO_NUM_37
+
 // Max printers supported via USB hub
 #define MAX_PRINTERS        3
 
