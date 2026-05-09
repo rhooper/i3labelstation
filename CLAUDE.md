@@ -15,7 +15,7 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 - 16x2 HD44780 LCD status display with clock (America/Detroit timezone, auto DST)
 - Buzzer feedback: good beep (C7), bad buzz (C4→A♭4), sad beep (C5→G4→E4 when no printer)
 - WiFi + SNTP with nightly resync at random time (midnight–5AM)
-- 3-position label-mode switch on GPIO 36/37 (NORMAL / SHORT / TODO) — see "Label Modes" below
+- 3-position label-mode switch on GPIO 11/13 (NORMAL / SHORT / TODO) — see "Label Modes" below
 
 ### What's Left
 1. **Boot-time printer detection**: Printer connected before boot isn't detected (hotplug works)
@@ -24,8 +24,8 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 
 ## Hardware Setup
 
-### Board: YD-ESP32-23 (2022-V1.3)
-- **COM port**: `/dev/tty.usbmodem5AE60214651` — programming + serial logs
+### Board: ESP32-S3-WROOM-1 N16R8 (16MB flash, 8MB octal PSRAM)
+- **COM port**: `/dev/tty.usbmodem5AE60209531` — programming + serial logs
 - **USB port** (USB-C, GPIO19/GPIO20): USB OTG Host — connect printer here via **USB A-to-C adapter**
 
 ### GPIO Assignments
@@ -37,9 +37,10 @@ Pure ESP-IDF + PlatformIO firmware at `esp32/labelscanstation/`. ESPHome approac
 | 18 | RFID UART RX |
 | 19/20 | USB OTG Host |
 | 17 | Option button (normally open, grounded when pressed) |
-| 36 | Mode switch A (gnd in mode 1 only) |
-| 37 | Mode switch B (gnd in mode 3 only) |
-| 38 | Buzzer (passive piezo, PWM) |
+| 11 | Mode switch A (gnd in mode 1 only) — was GPIO 36 |
+| 13 | Mode switch B (gnd in mode 3 only) — was GPIO 37 |
+| 12 | Buzzer (passive piezo, PWM) — was GPIO 38 |
+| 33-37 | Octal PSRAM data lines (do not use as GPIO) |
 | 43/44 | UART0 (serial logs) |
 | 48 | WS2812 RGB LED |
 
@@ -68,7 +69,7 @@ The build automatically regenerates `src/card_db.h` from `cards.tsv` via `script
 ```bash
 ../../.venv/bin/python -c "
 import serial, time
-s = serial.Serial('/dev/tty.usbmodem5AE60214651', 115200, timeout=0.5)
+s = serial.Serial('/dev/tty.usbmodem5AE60209531', 115200, timeout=0.5)
 while True:
     data = s.read(4096)
     if data: print(data.decode('utf-8', errors='replace'), end='')
@@ -94,7 +95,7 @@ while True:
 | `rfid_reader.*` | 125kHz RFID reader via UART |
 | `button.*` | Boot button driver (ISR-based, unused — polling in main) |
 | `status_led.*` | WS2812 RGB status LED |
-| `mode_switch.*` | 3-state mode switch on GPIO36/37 |
+| `mode_switch.*` | 3-state mode switch on GPIO 11/13 |
 
 ### LCD Display (16×2)
 - Ready: `SCAN CARD <MODE>` / `May  5  20:41:45` — line 0 cycles `SCAN CARD` / `SCAN FOB` every 3s; the right-hand 6 chars hold the current label mode (`NORMAL`, ` SHORT`, `  TODO`).
@@ -105,7 +106,7 @@ while True:
 
 ### Label Modes
 
-Driven by the GPIO 36/37 mode switch (`mode_switch.cpp`). Mode is captured at scan time so a switch flip during a print does not change the in-flight job.
+Driven by the GPIO 11/13 mode switch (`mode_switch.cpp`). Mode is captured at scan time so a switch flip during a print does not change the in-flight job.
 
 | Mode | LCD     | Layout |
 |------|---------|--------|
@@ -121,7 +122,7 @@ Mode 2 print quantity (`label_renderer_render` dispatcher):
 
 Switch encoding — standard SP3T slide. Middle detent floats both pins; left and right detents each ground one pin. Mode numbers follow physical detent order left → middle → right:
 
-| Mode | Detent | A (GPIO 36) | B (GPIO 37) |
+| Mode | Detent | A (GPIO 11) | B (GPIO 13) |
 |------|--------|-------------|-------------|
 | 1    | left   | gnd         | open        |
 | 2    | middle | open        | open        |
@@ -139,5 +140,5 @@ Command sequence adapts per model: invalidate(200 or 400 × 0x00) → init(0x1B 
 ## Conventions
 - Use `.venv/bin/python` and `.venv/bin/platformio` — never `source activate`
 - WiFi creds in `src/secrets.h` (gitignored)
-- Serial port: `/dev/tty.usbmodem5AE60214651`
+- Serial port: `/dev/tty.usbmodem5AE60209531`
 - `sdkconfig.defaults` applied via `board_build.cmake_extra_args`; `fullclean` after changes

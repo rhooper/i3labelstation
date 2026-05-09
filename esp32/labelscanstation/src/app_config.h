@@ -40,7 +40,7 @@
 #define LCD_I2C_PORT        I2C_NUM_0
 
 // Buzzer (passive piezo via PWM)
-#define BUZZER_GPIO         GPIO_NUM_38
+#define BUZZER_GPIO         GPIO_NUM_12
 
 // Force the firmware to treat loaded media as 29mm continuous tape regardless
 // of what the printer reports. Used because the deployed printer carries
@@ -57,8 +57,8 @@
 //   Mode 1: A open,  B open
 //   Mode 2: A open,  B gnd
 //   Mode 3: A gnd,   B gnd
-#define MODE_SWITCH_A_GPIO  GPIO_NUM_36
-#define MODE_SWITCH_B_GPIO  GPIO_NUM_37
+#define MODE_SWITCH_A_GPIO  GPIO_NUM_11
+#define MODE_SWITCH_B_GPIO  GPIO_NUM_13
 
 // Max printers supported via USB hub
 #define MAX_PRINTERS        3
