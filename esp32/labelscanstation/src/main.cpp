@@ -546,7 +546,7 @@ extern "C" void app_main(void) {
     xTaskCreate(print_task, "print_task", 16384, nullptr, 1, nullptr);
 
     // Start LCD update task (refreshes clock + status every 500ms, or on mode change)
-    xTaskCreate(lcd_update_task, "lcd_update", 2048, nullptr, 1, &s_lcd_task_handle);
+    xTaskCreate(lcd_update_task, "lcd_update", 4096, nullptr, 1, &s_lcd_task_handle);
 
     // Mode-switch polling task. Started after LCD task so the change callback
     // has a valid task handle to notify.
