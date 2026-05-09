@@ -98,5 +98,5 @@ static void mode_switch_task(void *arg) {
 }
 
 void mode_switch_start_task(void) {
-    xTaskCreate(mode_switch_task, "mode_sw", 2048, nullptr, 4, nullptr);
+    xTaskCreate(mode_switch_task, "mode_sw", 4096, nullptr, 4, nullptr);
 }
