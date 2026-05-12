@@ -163,11 +163,25 @@ void lcd_init() {
 void lcd_set_line(int line, const char *text) {
     if (!s_initialized || line < 0 || line >= LCD_ROWS) return;
 
-    lcd_command(LCD_CMD_SET_DDRAM | ROW_OFFSETS[line]);
-
+    // Build the padded 16-char view actually written to DDRAM.
+    char rendered[LCD_COLS + 1];
     int len = strlen(text);
     for (int i = 0; i < LCD_COLS; i++) {
-        lcd_data(i < len ? (uint8_t)text[i] : ' ');
+        rendered[i] = i < len ? text[i] : ' ';
+    }
+    rendered[LCD_COLS] = '\0';
+
+    // Only log when the line's contents actually change — the update task
+    // repaints every 500ms and the clock line ticks once a second.
+    static char s_last[LCD_ROWS][LCD_COLS + 1] = {{0}};
+    if (strcmp(s_last[line], rendered) != 0) {
+        ESP_LOGI(TAG, "L%d|%s|", line, rendered);
+        memcpy(s_last[line], rendered, sizeof(rendered));
+    }
+
+    lcd_command(LCD_CMD_SET_DDRAM | ROW_OFFSETS[line]);
+    for (int i = 0; i < LCD_COLS; i++) {
+        lcd_data((uint8_t)rendered[i]);
     }
 }
 
