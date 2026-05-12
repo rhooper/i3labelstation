@@ -10,6 +10,7 @@ esp32/secrets.yaml
 # PlatformIO
 esp32/usb_test/.pio/
 esp32/labelscanstation/.pio/
+esp32/labelscanstation/managed_components/
 
 # Secrets
 esp32/labelscanstation/src/secrets.h
